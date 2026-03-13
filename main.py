@@ -127,7 +127,7 @@ class LeetCodePlugin(Star):
         self.admin_users = default_config["admin_users"]
         self.subscribed_groups = default_config["subscribed_groups"]
 
-    def _get_group_id(self, event: AstrMessageEvent) -&gt; Optional[str]:
+    def _get_group_id(self, event: AstrMessageEvent) -> Optional[str]:
         """获取群组ID"""
         group_id = event.get_group_id()
         if group_id:
@@ -140,13 +140,13 @@ class LeetCodePlugin(Star):
         if group_id and hasattr(event, 'unified_msg_origin'):
             self.group_origins[group_id] = event.unified_msg_origin
 
-    def _get_session_for_group(self, group_id: str) -&gt; str:
+    def _get_session_for_group(self, group_id: str) -> str:
         """获取群的会话标识"""
         if group_id in self.group_origins:
             return self.group_origins[group_id]
         return group_id
 
-    def _is_admin(self, event: AstrMessageEvent) -&gt; bool:
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
         if event.is_admin():
             return True
@@ -219,7 +219,7 @@ class LeetCodePlugin(Star):
         except asyncio.CancelledError:
             logger.info("LeetCode 每日一题监控任务已停止")
 
-    async def _fetch_daily_question(self) -&gt; Optional[Dict]:
+    async def _fetch_daily_question(self) -> Optional[Dict]:
         """获取 LeetCode 每日一题 - 使用可靠的第三方 API"""
         if not self._session:
             logger.error("HTTP 会话未初始化")
@@ -264,7 +264,7 @@ class LeetCodePlugin(Star):
 
         return None
 
-    def _build_question_message(self, question: Dict) -&gt; List:
+    def _build_question_message(self, question: Dict) -> List:
         """构建题目消息"""
         chain = []
 
