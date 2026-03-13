@@ -1,0 +1,20 @@
+name: astrbot_plugin_leetcode
+desc: LeetCode 每日一题提醒插件，定时推送每日一题
+help: |
+  📢 LeetCode 每日一题提醒插件
+
+  【功能】
+  定时获取 LeetCode 每日一题并推送到订阅的群组
+
+  【命令】
+  /lc菜单 - 查看主菜单
+  /lc帮助 - 查看详细帮助
+  /lc订阅 - 在当前群订阅每日一题
+  /lc退订 - 在当前群取消订阅
+  /lc今日 - 立即获取今日题目
+  /lc列表 - 查看当前群的订阅状态
+  /lc全部订阅 - 查看所有群的订阅
+
+version: "1.0.0"
+author: NumInvis
+repo: https://github.com/NumInvis/astrbot_plugin_leetcode

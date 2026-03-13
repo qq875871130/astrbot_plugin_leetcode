@@ -1,0 +1,9 @@
+{
+    "name": "astrbot_plugin_leetcode",
+    "display_name": "LeetCode 每日一题",
+    "description": "LeetCode 每日一题提醒插件，定时推送每日一题",
+    "author": "NumInvis",
+    "social_link": "https://github.com/NumInvis",
+    "repository": "https://github.com/NumInvis/astrbot_plugin_leetcode",
+    "tags": ["LeetCode", "算法", "每日一题", "提醒"]
+}
