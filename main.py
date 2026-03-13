@@ -401,8 +401,8 @@ class LeetCodePlugin(Star):
         if content:
             clean_content = clean_html(content)
             chain.append(Comp.Plain(f"\n📝 题目描述:\n"))
-            # 分段发送，避免消息过长
-            max_length = 1500
+            # 分段发送，避免消息过长，上限3000字符
+            max_length = 3000
             if len(clean_content) > max_length:
                 chain.append(Comp.Plain(clean_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"))
             else:
@@ -448,7 +448,7 @@ class LeetCodePlugin(Star):
 【查询命令】
 📋 /lc今日 - 立即获取今日题目（含完整描述）
 🔍 /lc题目 [题号] - 查询指定题目（如: /lc题目 1）
-🤖 /lc解题 - 使用AI分析并解答今日题目
+🤖 /lc解题 [题号] - 使用AI分析并解答题目（如: /lc解题 1）
 📋 /lc列表 - 查看当前群订阅状态
 
 【管理命令】
@@ -474,7 +474,9 @@ class LeetCodePlugin(Star):
 2️⃣ /lc题目 [题号] - 查询指定题号的题目
    示例: /lc题目 1 (查询两数之和)
    示例: /lc题目  (不传参数则获取今日题目)
-3️⃣ /lc解题 - 使用AI分析题目并提供解题思路、代码和关键点
+3️⃣ /lc解题 [题号] - 使用AI分析题目并提供解题思路、代码和关键点
+   示例: /lc解题 1 (AI解答两数之和)
+   示例: /lc解题  (不传参数则解答今日题目)
 4️⃣ /lc列表 - 查看当前群是否已订阅
 
 【管理命令】
@@ -646,28 +648,39 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             yield event.chain_result(chain)
 
     @filter.command("lc解题")
-    async def cmd_solve(self, event: AstrMessageEvent):
-        """使用AI分析并解答今日题目"""
+    async def cmd_solve(self, event: AstrMessageEvent, question_id: str = ""):
+        """使用AI分析并解答题目，不传参数则解答今日题目"""
         self._save_group_origin(event)
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        today_date = datetime.now().strftime("%Y-%m-%d")
+        if not question_id:
+            # 没有提供题目号，获取今日题目
+            today_date = datetime.now().strftime("%Y-%m-%d")
 
-        # 检查缓存
-        if self.today_question and self.today_date == today_date:
-            question = self.today_question
+            # 检查缓存
+            if self.today_question and self.today_date == today_date:
+                question = self.today_question
+            else:
+                yield event.plain_result("⏳ 正在获取今日题目...")
+                question = await self._fetch_daily_question()
+                if question:
+                    self.today_question = question
+                    self.today_date = today_date
+
+            if not question:
+                yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
+                return
         else:
-            yield event.plain_result("⏳ 正在获取今日题目...")
-            question = await self._fetch_daily_question()
-            if question:
-                self.today_question = question
-                self.today_date = today_date
+            # 提供了题目号，查询指定题目
+            yield event.plain_result(f"⏳ 正在查询题目 {question_id}...")
 
-        if not question:
-            yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
-            return
+            question = await self._fetch_question_by_id(question_id)
+
+            if not question:
+                yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
+                return
 
         content = question.get("content", "")
         if not content:
@@ -698,7 +711,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 标签: {', '.join(tags)}
 
 题目描述:
-{clean_content[:1500]}
+{clean_content[:3000]}
 
 请提供：
 1. 题目理解：简要说明题目要求
