@@ -544,6 +544,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
     async def cmd_today(self, event: AstrMessageEvent):
         """获取今日题目"""
         self._save_group_origin(event)
+        if not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
 
         today_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -605,6 +608,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
     async def cmd_question(self, event: AstrMessageEvent, question_id: str = ""):
         """根据题目号查询题目，不传参数则获取今日题目"""
         self._save_group_origin(event)
+        if not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
 
         if not question_id:
             # 没有提供题目号，获取今日题目
@@ -643,6 +649,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
     async def cmd_solve(self, event: AstrMessageEvent):
         """使用AI分析并解答今日题目"""
         self._save_group_origin(event)
+        if not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
 
         today_date = datetime.now().strftime("%Y-%m-%d")
 
