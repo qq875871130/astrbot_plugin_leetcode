@@ -125,7 +125,7 @@ class LeetCodePlugin(Star):
         self.inform_hour = default_config["inform_hour"]
         self.inform_minute = default_config["inform_minute"]
         self.admin_users = default_config["admin_users"]
-        self.subscribed_groups: List[str] = default_config["subscribed_groups"]
+        self.subscribed_groups = default_config["subscribed_groups"]
 
     def _get_group_id(self, event: AstrMessageEvent) -&gt; Optional[str]:
         """获取群组ID"""
