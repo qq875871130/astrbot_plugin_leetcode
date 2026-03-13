@@ -7,6 +7,7 @@ LeetCode 每日一题提醒插件
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
@@ -18,6 +19,21 @@ from astrbot.core.message.message_event_result import MessageChain
 import astrbot.core.message.components as Comp
 
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
+
+
+def clean_html(html_content: str) -> str:
+    """清理HTML标签，提取纯文本"""
+    if not html_content:
+        return ""
+    # 移除HTML标签
+    text = re.sub(r'<[^>]+>', '', html_content)
+    # 解码HTML实体
+    text = text.replace('&quot;', '"').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&nbsp;', ' ').replace('&#39;', "'")
+    # 移除多余空白
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    text = text.strip()
+    return text
 
 
 # ============ 配置常量 ============
@@ -252,6 +268,9 @@ class LeetCodePlugin(Star):
             if not title_cn:
                 title_cn = title
             
+            # 获取题目内容（HTML格式，需要清理）
+            content_html = question.get("content", "")
+            
             result = {
                 "date": data.get("date"),
                 "title": title,
@@ -261,7 +280,8 @@ class LeetCodePlugin(Star):
                 "difficulty": question.get("difficulty"),
                 "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
                 "link": f"https://leetcode.com{link}" if link.startswith("/") else link,
-                "topicTags": question.get("topicTags", [])
+                "topicTags": question.get("topicTags", []),
+                "content": content_html
             }
             
             logger.info(f"成功获取题目: {result}")
@@ -314,7 +334,19 @@ class LeetCodePlugin(Star):
             chain.append(Comp.Plain(f"通过率: {ac_rate * 100:.1f}%\n"))
         if tags:
             chain.append(Comp.Plain(f"标签: {', '.join(tags)}\n"))
-        chain.append(Comp.Plain(f"🔗 链接: {link}"))
+        chain.append(Comp.Plain(f"🔗 链接: {link}\n"))
+        
+        # 添加题目内容摘要
+        content = question.get("content", "")
+        if content:
+            clean_content = clean_html(content)
+            # 只显示前300个字符作为摘要
+            if len(clean_content) > 300:
+                summary = clean_content[:300] + "..."
+            else:
+                summary = clean_content
+            chain.append(Comp.Plain(f"\n📝 题目描述:\n{summary}\n"))
+            chain.append(Comp.Plain("💡 使用 /lc解析 获取完整题目解析"))
 
         return chain
 
@@ -354,7 +386,9 @@ class LeetCodePlugin(Star):
         msg = """🤖 LeetCode 每日一题 - 主菜单
 
 【查询命令】
-📋 /lc今日 - 立即获取今日题目
+📋 /lc今日 - 立即获取今日题目（含题目描述）
+📖 /lc解析 - 获取完整题目内容
+🤖 /lc解题 - 使用AI分析并解答题目
 📋 /lc列表 - 查看当前群订阅状态
 
 【管理命令】
@@ -376,13 +410,19 @@ class LeetCodePlugin(Star):
         msg = """📖 LeetCode 每日一题 - 详细使用说明
 
 【查询命令】
-1️⃣ /lc今日 - 立即获取并显示今日题目
-2️⃣ /lc列表 - 查看当前群是否已订阅
+1️⃣ /lc今日 - 立即获取并显示今日题目（含题目描述摘要）
+2️⃣ /lc解析 - 获取完整题目内容和描述
+3️⃣ /lc解题 - 使用AI分析题目并提供解题思路、代码和关键点
+4️⃣ /lc列表 - 查看当前群是否已订阅
 
 【管理命令】
-3️⃣ /lc订阅 - 在当前群订阅每日一题推送
-4️⃣ /lc退订 - 在当前群取消每日一题推送
-5️⃣ /lc全部订阅 - 查看所有群的订阅情况（超级管理员）
+5️⃣ /lc订阅 - 在当前群订阅每日一题推送
+6️⃣ /lc退订 - 在当前群取消每日一题推送
+7️⃣ /lc全部订阅 - 查看所有群的订阅情况（超级管理员）
+
+【AI解题说明】
+/lc解题命令需要AstrBot已配置LLM提供商（如OpenAI、Claude等）
+AI会提供：题目理解、解题思路、算法步骤、参考代码、关键点
 
 【配置】
 - 默认每日 09:00 推送
@@ -498,3 +538,123 @@ class LeetCodePlugin(Star):
             lines.append(f"{i}. {group_id}")
 
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("lc解析")
+    async def cmd_parse(self, event: AstrMessageEvent):
+        """获取今日题目的完整解析"""
+        self._save_group_origin(event)
+
+        today_date = datetime.now().strftime("%Y-%m-%d")
+
+        # 检查缓存
+        if self.today_question and self.today_date == today_date:
+            question = self.today_question
+        else:
+            yield event.plain_result("⏳ 正在获取今日题目...")
+            question = await self._fetch_daily_question()
+            if question:
+                self.today_question = question
+                self.today_date = today_date
+
+        if not question:
+            yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
+            return
+
+        content = question.get("content", "")
+        if not content:
+            yield event.plain_result("❌ 暂无题目内容")
+            return
+
+        clean_content = clean_html(content)
+        title_cn = question.get("titleCn") or question.get("title", "未知题目")
+        qid = question.get("frontendQuestionId", "")
+
+        msg = f"📖 【{qid}. {title_cn}】完整题目\n"
+        msg += "=" * 40 + "\n\n"
+        msg += clean_content[:2000]  # 限制长度避免消息过长
+        if len(clean_content) > 2000:
+            msg += "\n\n... (内容已截断，请访问链接查看完整题目)"
+
+        yield event.plain_result(msg)
+
+    @filter.command("lc解题")
+    async def cmd_solve(self, event: AstrMessageEvent):
+        """使用AI分析并解答今日题目"""
+        self._save_group_origin(event)
+
+        today_date = datetime.now().strftime("%Y-%m-%d")
+
+        # 检查缓存
+        if self.today_question and self.today_date == today_date:
+            question = self.today_question
+        else:
+            yield event.plain_result("⏳ 正在获取今日题目...")
+            question = await self._fetch_daily_question()
+            if question:
+                self.today_question = question
+                self.today_date = today_date
+
+        if not question:
+            yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
+            return
+
+        content = question.get("content", "")
+        if not content:
+            yield event.plain_result("❌ 暂无题目内容")
+            return
+
+        title_cn = question.get("titleCn") or question.get("title", "未知题目")
+        qid = question.get("frontendQuestionId", "")
+        difficulty = question.get("difficulty", "")
+        tags = []
+        for tag in question.get("topicTags", []):
+            if isinstance(tag, dict):
+                tag_name = tag.get("nameTranslated") or tag.get("name", "")
+                if tag_name:
+                    tags.append(tag_name)
+
+        clean_content = clean_html(content)
+
+        yield event.plain_result("🤖 正在使用AI分析题目，请稍候...")
+
+        try:
+            # 构建提示词
+            prompt = f"""请作为算法专家，分析并解答以下LeetCode题目：
+
+题目编号: {qid}
+题目名称: {title_cn}
+难度: {difficulty}
+标签: {', '.join(tags)}
+
+题目描述:
+{clean_content[:1500]}
+
+请提供：
+1. 题目理解：简要说明题目要求
+2. 解题思路：分析解题方法，包括时间复杂度和空间复杂度
+3. 算法步骤：详细说明解题步骤
+4. 参考代码：提供Python实现（包含注释）
+5. 关键点：总结解题的关键要点
+
+请用中文回答。"""
+
+            # 调用LLM
+            umo = event.unified_msg_origin
+            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+
+            answer = llm_resp.completion_text
+
+            msg = f"🤖 【{qid}. {title_cn}】AI解题分析\n"
+            msg += "=" * 40 + "\n\n"
+            msg += answer
+
+            yield event.plain_result(msg)
+
+        except Exception as e:
+            logger.error(f"AI解题失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ AI解题失败: {e}\n请检查是否已配置LLM提供商")
