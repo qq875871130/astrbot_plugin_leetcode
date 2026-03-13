@@ -10,7 +10,6 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
-import requests
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
@@ -213,49 +212,60 @@ class LeetCodePlugin(Star):
             logger.info("LeetCode 每日一题监控任务已停止")
 
     async def _fetch_daily_question(self) -> Optional[Dict]:
-        """获取 LeetCode 每日一题 - 使用可靠的第三方 API"""
+        """获取 LeetCode 每日一题 - 使用内置的 urllib"""
         try:
+            import urllib.request
+            import ssl
+            
             url = "https://leetcode-api-pied.vercel.app/daily"
             logger.info(f"正在向 {url} 发送请求")
             
-            # 使用线程池执行同步的requests请求
+            # 创建SSL上下文，忽略证书验证
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # 使用线程池执行同步请求
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: requests.get(url, timeout=30)
-            )
             
-            logger.info(f"响应状态码: {response.status_code}")
+            def fetch():
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                )
+                with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                    return response.read().decode('utf-8')
             
-            if response.status_code == 200:
-                data = response.json()
-                question = data.get("question", {})
-                link = data.get("link", "")
-                title_slug = question.get("titleSlug")
-                
-                # 获取标题（优先使用中文标题，如果没有则使用英文）
-                title = question.get("title", "")
-                title_cn = question.get("translatedTitle")
-                if not title_cn:
-                    title_cn = title
-                
-                result = {
-                    "date": data.get("date"),
-                    "title": title,
-                    "titleCn": title_cn,
-                    "titleSlug": title_slug,
-                    "frontendQuestionId": question.get("questionFrontendId"),
-                    "difficulty": question.get("difficulty"),
-                    "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
-                    "link": f"https://leetcode.com{link}" if link.startswith("/") else link,
-                    "topicTags": question.get("topicTags", [])
-                }
-                
-                logger.info(f"成功获取题目: {result}")
-                return result
-            else:
-                logger.error(f"请求失败，状态码: {response.status_code}")
-                logger.error(f"响应内容: {response.text}")
+            response_text = await loop.run_in_executor(None, fetch)
+            logger.info(f"响应内容: {response_text[:200]}")
+            
+            data = json.loads(response_text)
+            question = data.get("question", {})
+            link = data.get("link", "")
+            title_slug = question.get("titleSlug")
+            
+            # 获取标题（优先使用中文标题，如果没有则使用英文）
+            title = question.get("title", "")
+            title_cn = question.get("translatedTitle")
+            if not title_cn:
+                title_cn = title
+            
+            result = {
+                "date": data.get("date"),
+                "title": title,
+                "titleCn": title_cn,
+                "titleSlug": title_slug,
+                "frontendQuestionId": question.get("questionFrontendId"),
+                "difficulty": question.get("difficulty"),
+                "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
+                "link": f"https://leetcode.com{link}" if link.startswith("/") else link,
+                "topicTags": question.get("topicTags", [])
+            }
+            
+            logger.info(f"成功获取题目: {result}")
+            return result
         except Exception as e:
             logger.error(f"获取 LeetCode 每日一题失败: {e}", exc_info=True)
 
