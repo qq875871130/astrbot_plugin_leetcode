@@ -170,11 +170,7 @@ class LeetCodePlugin(Star):
         """插件初始化时执行"""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Content-Type": "application/json",
-            "Origin": "https://leetcode.cn",
-            "Referer": "https://leetcode.cn/"
+            "Accept": "application/json"
         }
         self._session = aiohttp.ClientSession(headers=headers)
         self._monitor_task = asyncio.create_task(self._async_monitor())
@@ -224,85 +220,45 @@ class LeetCodePlugin(Star):
             logger.info("LeetCode 每日一题监控任务已停止")
 
     async def _fetch_daily_question(self) -&gt; Optional[Dict]:
-        """获取 LeetCode 每日一题"""
+        """获取 LeetCode 每日一题 - 使用可靠的第三方 API"""
         if not self._session:
             logger.error("HTTP 会话未初始化")
             return None
 
         try:
-            url = "https://leetcode.cn/graphql"
-            query = """
-            query questionOfToday {
-              todayRecord {
-                date
-                userStatus
-                question {
-                  questionId
-                  frontendQuestionId: questionFrontendId
-                  difficulty
-                  title
-                  titleCn: translatedTitle
-                  titleSlug
-                  paidOnly: isPaidOnly
-                  freqBar
-                  isFavor
-                  acRate
-                  status
-                  solutionNum
-                  hasVideoSolution
-                  topicTags {
-                    name
-                    nameTranslated: translatedName
-                    id
-                    slug
-                  }
-                }
-                lastSubmission {
-                  id
-                }
-              }
-            }
-            """
-
+            url = "https://leetcode-api-pied.vercel.app/daily"
             logger.info(f"正在向 {url} 发送请求")
-            async with self._session.post(
+            
+            async with self._session.get(
                 url,
-                json={
-                    "query": query,
-                    "variables": {},
-                    "operationName": "questionOfToday"
-                },
                 timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 logger.info(f"响应状态码: {response.status}")
-                response_text = await response.text()
-                logger.info(f"响应内容: {response_text[:500]}")
                 
                 if response.status == 200:
-                    import json
-                    data = json.loads(response_text)
-                    today_records = data.get("data", {}).get("todayRecord", [])
-                    if today_records and len(today_records) &gt; 0:
-                        daily_data = today_records[0]
-                        question = daily_data.get("question", {})
-                        title_slug = question.get("titleSlug")
-                        result = {
-                            "date": daily_data.get("date"),
-                            "title": question.get("title"),
-                            "titleCn": question.get("titleCn"),
-                            "titleSlug": title_slug,
-                            "frontendQuestionId": question.get("frontendQuestionId"),
-                            "difficulty": question.get("difficulty"),
-                            "acRate": question.get("acRate"),
-                            "link": f"https://leetcode.cn/problems/{title_slug}/",
-                            "topicTags": question.get("topicTags", [])
-                        }
-                        logger.info(f"成功获取题目: {result}")
-                        return result
-                    else:
-                        logger.error("未找到 todayRecord 数据")
+                    data = await response.json()
+                    question = data.get("question", {})
+                    link = data.get("link", "")
+                    title_slug = question.get("titleSlug")
+                    
+                    result = {
+                        "date": data.get("date"),
+                        "title": question.get("title"),
+                        "titleCn": question.get("translatedTitle"),
+                        "titleSlug": title_slug,
+                        "frontendQuestionId": question.get("questionFrontendId"),
+                        "difficulty": question.get("difficulty"),
+                        "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
+                        "link": f"https://leetcode.cn{link}" if link.startswith("/") else link,
+                        "topicTags": question.get("topicTags", [])
+                    }
+                    
+                    logger.info(f"成功获取题目: {result}")
+                    return result
                 else:
                     logger.error(f"请求失败，状态码: {response.status}")
+                    response_text = await response.text()
+                    logger.error(f"响应内容: {response_text}")
         except Exception as e:
             logger.error(f"获取 LeetCode 每日一题失败: {e}", exc_info=True)
 
