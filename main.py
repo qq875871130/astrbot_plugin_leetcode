@@ -86,14 +86,21 @@ class LeetCodePlugin(Star):
 
     def _load_config(self):
         """加载配置文件"""
-        # 默认配置
+        # 默认配置（包含所有配置项的默认值）
         default_config = {
             "check_interval_seconds": 3600,
             "inform_hour": 9,
             "inform_minute": 0,
             "admin_users": [],
             "group_origins": {},
-            "subscribed_groups": []
+            "subscribed_groups": [],
+            # 多语言和个人订阅配置默认值
+            "default_language": "zh",
+            "enable_personal_subscribe": True,
+            "personal_inform_hour": 9,
+            "personal_inform_minute": 30,
+            "enable_llm_translation": True,
+            "translation_provider_id": ""
         }
 
         # 从文件加载配置
@@ -111,6 +118,7 @@ class LeetCodePlugin(Star):
         try:
             # 在 AstrBot v4 中，通过 context 获取配置
             astrbot_config = getattr(self.context, 'config', None)
+            logger.info(f"[配置加载] astrbot_config 存在: {astrbot_config is not None}")
             if astrbot_config:
                 default_config["check_interval_seconds"] = astrbot_config.get(
                     "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
@@ -128,24 +136,29 @@ class LeetCodePlugin(Star):
                     default_config["admin_users"] = [str(u) for u in admin_from_config]
 
                 # 加载多语言和个人订阅配置
+                raw_translation_provider_id = astrbot_config.get("translation_provider_id")
+                logger.info(f"[配置加载] 从 AstrBot 读取 translation_provider_id: '{raw_translation_provider_id}'")
+                
                 default_config["default_language"] = astrbot_config.get(
-                    "default_language", default_config.get("default_language", "zh")
+                    "default_language", default_config["default_language"]
                 )
                 default_config["enable_personal_subscribe"] = astrbot_config.get(
-                    "enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
+                    "enable_personal_subscribe", default_config["enable_personal_subscribe"]
                 )
                 default_config["personal_inform_hour"] = astrbot_config.get(
-                    "personal_inform_hour", default_config.get("personal_inform_hour", 9)
+                    "personal_inform_hour", default_config["personal_inform_hour"]
                 )
                 default_config["personal_inform_minute"] = astrbot_config.get(
-                    "personal_inform_minute", default_config.get("personal_inform_minute", 30)
+                    "personal_inform_minute", default_config["personal_inform_minute"]
                 )
                 default_config["enable_llm_translation"] = astrbot_config.get(
-                    "enable_llm_translation", default_config.get("enable_llm_translation", True)
+                    "enable_llm_translation", default_config["enable_llm_translation"]
                 )
                 default_config["translation_provider_id"] = astrbot_config.get(
-                    "translation_provider_id", default_config.get("translation_provider_id", "")
+                    "translation_provider_id", default_config["translation_provider_id"]
                 )
+                
+                logger.info(f"[配置加载] 最终 translation_provider_id: '{default_config['translation_provider_id']}'")
         except Exception as e:
             logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
 
