@@ -8,7 +8,7 @@
   "default_language": {
     "description": "默认题目语言",
     "type": "string",
-    "hint": "题目显示的语言：zh(中文)、en(英文)、both(双语)",
+    "hint": "题目显示的语言：zh(中文)、en(英文)、both(双语)。注意：中文内容需要配置LLM提供商进行实时翻译",
     "default": "zh",
     "enum": ["zh", "en", "both"]
   },
@@ -29,5 +29,17 @@
     "type": "int",
     "hint": "个人订阅者接收题目的时间（0-59）",
     "default": 30
+  },
+  "enable_llm_translation": {
+    "description": "启用大模型翻译中文",
+    "type": "bool",
+    "hint": "中文题目内容将通过大模型API实时翻译（需要配置LLM提供商）。关闭则仅显示英文内容。",
+    "default": true
+  },
+  "translation_provider_id": {
+    "description": "翻译专用LLM提供商ID（可选）",
+    "type": "string",
+    "hint": "指定用于翻译的LLM提供商ID，留空则使用AstrBot默认提供商",
+    "default": ""
   }
 }

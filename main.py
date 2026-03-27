@@ -1,7 +1,7 @@
 """
 LeetCode 每日一题提醒插件
 移植自 nonebot-plugin-leetcode
-版本: 1.0.0
+版本: 1.1.0
 """
 
 import asyncio
@@ -9,14 +9,11 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.message_event_result import MessageChain
-import astrbot.core.message.components as Comp
 
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 
@@ -37,16 +34,15 @@ def clean_html(html_content: str) -> str:
 
 
 # ============ 配置常量 ============
-ADMIN_USERS: List[str] = []
+ADMIN_USERS: list = []
 
 
 @register(__plugin_name__, __author__, __plugin_desc__, __version__)
 class LeetCodePlugin(Star):
     """LeetCode 每日一题提醒插件主类"""
 
-    def __init__(self, context: Context, config: AstrBotConfig = None):
+    def __init__(self, context: Context):
         super().__init__(context)
-        self.config = config
         self.context = context
 
         # 数据目录
@@ -63,7 +59,7 @@ class LeetCodePlugin(Star):
 
         # 个人订阅相关数据结构
         self.user_origins: Dict[str, str] = {}  # 保存用户的 unified_msg_origin
-        self.subscribed_users: List[str] = []   # 订阅用户ID列表
+        self.subscribed_users: list = []   # 订阅用户ID列表
         self.user_language_prefs: Dict[str, str] = {}  # 用户语言偏好设置
 
         # 加载配置
@@ -112,35 +108,40 @@ class LeetCodePlugin(Star):
                 logger.error(f"加载配置文件失败: {e}")
 
         # 从 AstrBot 配置加载（优先级更高）
-        if self.config:
-            default_config["check_interval_seconds"] = self.config.get(
-                "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
-            )
-            default_config["inform_hour"] = self.config.get(
-                "leetcode_inform_hour", default_config["inform_hour"]
-            )
-            default_config["inform_minute"] = self.config.get(
-                "leetcode_inform_minute", default_config["inform_minute"]
-            )
+        try:
+            # 在 AstrBot v4 中，通过 context 获取配置
+            astrbot_config = getattr(self.context, 'config', None)
+            if astrbot_config:
+                default_config["check_interval_seconds"] = astrbot_config.get(
+                    "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
+                )
+                default_config["inform_hour"] = astrbot_config.get(
+                    "leetcode_inform_hour", default_config["inform_hour"]
+                )
+                default_config["inform_minute"] = astrbot_config.get(
+                    "leetcode_inform_minute", default_config["inform_minute"]
+                )
 
-            # 加载管理员列表
-            admin_from_config = self.config.get("leetcode_admin_users", [])
-            if admin_from_config:
-                default_config["admin_users"] = [str(u) for u in admin_from_config]
+                # 加载管理员列表
+                admin_from_config = astrbot_config.get("leetcode_admin_users", [])
+                if admin_from_config:
+                    default_config["admin_users"] = [str(u) for u in admin_from_config]
 
-            # 加载多语言和个人订阅配置
-            default_config["default_language"] = self.config.get(
-                "leetcode_default_language", default_config.get("default_language", "zh")
-            )
-            default_config["enable_personal_subscribe"] = self.config.get(
-                "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
-            )
-            default_config["personal_inform_hour"] = self.config.get(
-                "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
-            )
-            default_config["personal_inform_minute"] = self.config.get(
-                "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
-            )
+                # 加载多语言和个人订阅配置
+                default_config["default_language"] = astrbot_config.get(
+                    "leetcode_default_language", default_config.get("default_language", "zh")
+                )
+                default_config["enable_personal_subscribe"] = astrbot_config.get(
+                    "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
+                )
+                default_config["personal_inform_hour"] = astrbot_config.get(
+                    "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
+                )
+                default_config["personal_inform_minute"] = astrbot_config.get(
+                    "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
+                )
+        except Exception as e:
+            logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
 
         # 加载订阅配置（动态修改的）
         if os.path.exists(self.subscription_file):
@@ -167,6 +168,10 @@ class LeetCodePlugin(Star):
         self.enable_personal_subscribe = default_config.get("enable_personal_subscribe", True)
         self.personal_inform_hour = default_config.get("personal_inform_hour", 9)
         self.personal_inform_minute = default_config.get("personal_inform_minute", 30)
+
+        # 大模型翻译配置
+        self.enable_llm_translation = default_config.get("enable_llm_translation", True)
+        self.translation_provider_id = default_config.get("translation_provider_id", "")
 
         # 加载个人订阅配置
         self._load_personal_subscription()
@@ -327,7 +332,7 @@ class LeetCodePlugin(Star):
             import ssl
 
             url = "https://leetcode-api-pied.vercel.app/daily"
-            logger.info(f"正在向 {url} 发送请求")
+            logger.info(f"[每日一题] 开始获取，URL: {url}")
 
             # 创建SSL上下文，忽略证书验证
             ssl_context = ssl.create_default_context()
@@ -348,21 +353,45 @@ class LeetCodePlugin(Star):
                     return response.read().decode('utf-8')
 
             response_text = await loop.run_in_executor(None, fetch)
-            logger.info(f"响应内容: {response_text[:200]}")
+            logger.info(f"[每日一题] API 原始响应: {response_text[:500]}...")
 
             data = json.loads(response_text)
             question = data.get("question", {})
             link = data.get("link", "")
             title_slug = question.get("titleSlug")
 
-            # 获取标题（优先使用中文标题，如果没有则使用英文）
+            logger.info(f"[每日一题] 解析数据 - titleSlug: {title_slug}, link: {link}")
+            logger.info(f"[每日一题] question 对象 keys: {list(question.keys())}")
+
+            # 获取标题和内容（英文）
             title = question.get("title", "")
-            title_cn = question.get("translatedTitle")
+            content_html = question.get("content", "")
+            logger.info(f"[每日一题] 英文内容 - 标题: {title}, 内容长度: {len(content_html) if content_html else 0}")
+
+            # 使用大模型翻译获取中文内容
+            title_cn = ""
+            content_cn = ""
+            content_cn_failed = False
+            
+            if self.enable_llm_translation and title_slug:
+                logger.info(f"[每日一题] 准备使用大模型翻译，title_slug: {title_slug}")
+                try:
+                    title_cn, content_cn, translation_success = await self._fetch_chinese_content(
+                        title_slug, title, content_html
+                    )
+                    if not translation_success:
+                        content_cn_failed = True
+                        logger.warning(f"[每日一题] 大模型翻译未完全成功")
+                except Exception as e:
+                    logger.warning(f"[每日一题] 大模型翻译失败: {e}")
+                    content_cn_failed = True
+            else:
+                logger.info(f"[每日一题] 大模型翻译已禁用或无title_slug，使用英文内容")
+                content_cn_failed = True
+            
+            # 如果没有翻译成功，使用英文作为后备
             if not title_cn:
                 title_cn = title
-
-            # 获取题目内容（HTML格式，需要清理）
-            content_html = question.get("content", "")
 
             result = {
                 "date": data.get("date"),
@@ -374,15 +403,121 @@ class LeetCodePlugin(Star):
                 "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
                 "link": f"https://leetcode.com{link}" if link.startswith("/") else link,
                 "topicTags": question.get("topicTags", []),
-                "content": content_html
+                "content": content_html,
+                "contentCn": content_cn,
+                "contentCnFailed": content_cn_failed
             }
 
-            logger.info(f"成功获取题目: {result}")
+            logger.info(f"[每日一题] 最终结果 - 标题: {title_cn or title}, content长度: {len(content_html) if content_html else 0}, contentCn长度: {len(content_cn) if content_cn else 0}, 失败: {content_cn_failed}")
             return result
         except Exception as e:
-            logger.error(f"获取 LeetCode 每日一题失败: {e}", exc_info=True)
+            logger.error(f"[每日一题] 获取 LeetCode 每日一题失败: {e}", exc_info=True)
 
         return None
+
+    async def _translate_with_llm(self, title: str, content: str, is_title: bool = False) -> str:
+        """使用大模型API翻译题目内容
+        
+        Args:
+            title: 英文标题
+            content: 英文内容（HTML格式）
+            is_title: 是否只翻译标题
+            
+        Returns:
+            中文翻译结果
+        """
+        if not self.enable_llm_translation:
+            logger.info("[LLM翻译] 大模型翻译已禁用，跳过翻译")
+            return ""
+        
+        try:
+            logger.info(f"[LLM翻译] 开始翻译{'标题' if is_title else '内容'}: {title[:50] if title else 'Unknown'}...")
+            
+            # 清理HTML内容
+            clean_content = clean_html(content) if content else ""
+            
+            if is_title:
+                # 只翻译标题
+                prompt = f"""请将以下LeetCode题目标题翻译成简洁的中文，只返回翻译后的标题，不要有任何解释：
+
+英文标题: {title}
+
+中文标题:"""
+            else:
+                # 翻译完整内容
+                prompt = f"""请将以下LeetCode题目内容翻译成中文。要求：
+1. 保持专业术语准确（如 array 译为数组，tree 译为树）
+2. 保持代码和数学公式不变
+3. 保持格式清晰，使用Markdown格式
+4. 只返回翻译后的内容，不要添加额外说明
+
+题目: {title}
+
+内容:
+{clean_content[:8000]}
+
+中文翻译:"""
+
+            # 调用LLM
+            provider_id = self.translation_provider_id if self.translation_provider_id else None
+            
+            logger.info(f"[LLM翻译] 调用大模型API，provider_id: {provider_id or 'default'}")
+            
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            
+            translated_text = llm_resp.completion_text.strip()
+            logger.info(f"[LLM翻译] 翻译完成，结果长度: {len(translated_text)}")
+            
+            return translated_text
+            
+        except Exception as e:
+            logger.error(f"[LLM翻译] 翻译失败: {e}")
+            return ""
+
+    async def _translate_title_with_llm(self, title: str) -> str:
+        """使用大模型翻译标题"""
+        return await self._translate_with_llm(title, "", is_title=True)
+
+    async def _fetch_chinese_content(self, title_slug: str, title: str = "", content: str = "") -> tuple:
+        """获取中文题目内容 - 使用大模型API翻译
+        
+        Args:
+            title_slug: 题目slug
+            title: 英文标题（用于翻译）
+            content: 英文内容（用于翻译）
+            
+        Returns:
+            tuple: (中文标题, 中文内容, 是否翻译成功)
+        """
+        logger.info(f"[中文内容] 使用大模型翻译，title_slug: {title_slug}")
+        
+        translated_title = ""
+        translated_content = ""
+        translation_success = False
+        
+        try:
+            # 翻译标题
+            if title:
+                translated_title = await self._translate_title_with_llm(title)
+                if translated_title:
+                    logger.info(f"[中文内容] 标题翻译成功: {translated_title[:50]}...")
+            
+            # 翻译内容
+            if content:
+                translated_content = await self._translate_with_llm(title, content, is_title=False)
+                if translated_content:
+                    logger.info(f"[中文内容] 内容翻译成功，长度: {len(translated_content)}")
+                    translation_success = True
+            
+            return translated_title, translated_content, translation_success
+            
+        except Exception as e:
+            logger.warning(f"[中文内容] 大模型翻译失败: {e}")
+            return "", "", False
+            return ""
 
     async def _fetch_question_by_id(self, question_id: str) -> Optional[Dict]:
         """根据题目号获取 LeetCode 题目详情"""
@@ -417,9 +552,35 @@ class LeetCodePlugin(Star):
 
             data = json.loads(response_text)
 
-            # 获取标题（优先使用中文标题）
+            # 获取英文标题和内容
             title = data.get("title", "")
-            title_cn = data.get("title_cn", "")
+            slug = data.get("slug", "")
+            content_en = data.get("content", "")
+            
+            logger.info(f"[题目查询] 英文内容 - 标题: {title}, slug: {slug}, 内容长度: {len(content_en) if content_en else 0}")
+
+            # 使用大模型翻译获取中文内容
+            title_cn = ""
+            content_cn = ""
+            content_cn_failed = False
+            
+            if self.enable_llm_translation and slug:
+                logger.info(f"[题目查询] 准备使用大模型翻译")
+                try:
+                    title_cn, content_cn, translation_success = await self._fetch_chinese_content(
+                        slug, title, content_en
+                    )
+                    if not translation_success:
+                        content_cn_failed = True
+                        logger.warning(f"[题目查询] 大模型翻译未完全成功")
+                except Exception as e:
+                    logger.warning(f"[题目查询] 大模型翻译失败: {e}")
+                    content_cn_failed = True
+            else:
+                logger.info(f"[题目查询] 大模型翻译已禁用或无slug")
+                content_cn_failed = True
+            
+            # 如果没有翻译成功，使用英文作为后备
             if not title_cn:
                 title_cn = title
 
@@ -428,30 +589,34 @@ class LeetCodePlugin(Star):
                 "date": "",
                 "title": title,
                 "titleCn": title_cn,
-                "titleSlug": data.get("slug", ""),
+                "titleSlug": slug,
                 "frontendQuestionId": str(data.get("id", question_id)),
                 "difficulty": data.get("difficulty", ""),
                 "acRate": 0,
-                "link": f"https://leetcode.com/problems/{data.get('slug', '')}/",
+                "link": f"https://leetcode.com/problems/{slug}/",
                 "topicTags": [],
-                "content": data.get("content", "")
+                "content": content_en,
+                "contentCn": content_cn,
+                "contentCnFailed": content_cn_failed
             }
 
-            logger.info(f"成功获取题目 {question_id}: {result['title']}")
+            logger.info(f"成功获取题目 {question_id}: {title_cn or title}")
             return result
         except Exception as e:
             logger.error(f"获取题目 {question_id} 失败: {e}", exc_info=True)
 
         return None
 
-    def _build_question_message(self, question: Dict, language: str = "zh") -> List:
+    def _build_question_message(self, question: Dict, language: str = "zh") -> str:
         """构建题目消息，支持多语言显示
         
         Args:
             question: 题目数据字典
             language: 语言选项 - "zh"(中文), "en"(英文), "both"(双语)
         """
-        chain = []
+        logger.info(f"[构建消息] 开始构建，language: {language}, question.keys: {list(question.keys())}")
+
+        result_text = f"📅 {question.get('date', '')}\n"
 
         difficulty_emoji = {
             "Easy": "🟢",
@@ -484,64 +649,116 @@ class LeetCodePlugin(Star):
                 tags.append(str(tag))
 
         # 根据语言设置构建标题
-        chain.append(Comp.Plain(f"📅 {question.get('date', '')}\n"))
-        
         if language == "zh":
             # 仅中文
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+            result_text += f"{emoji} 【{qid}. {title_cn}】\n"
         elif language == "en":
             # 仅英文
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title}】\n"))
+            result_text += f"{emoji} 【{qid}. {title}】\n"
         else:
             # 双语模式
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+            result_text += f"{emoji} 【{qid}. {title_cn}】\n"
             if title_cn != title:
-                chain.append(Comp.Plain(f"English: {title}\n"))
+                result_text += f"English: {title}\n"
 
-        chain.append(Comp.Plain(f"难度: {difficulty_cn_text}\n"))
+        result_text += f"难度: {difficulty_cn_text}\n"
         if ac_rate:
-            chain.append(Comp.Plain(f"通过率: {ac_rate * 100:.1f}%\n"))
+            result_text += f"通过率: {ac_rate * 100:.1f}%\n"
         if tags:
-            chain.append(Comp.Plain(f"标签: {', '.join(tags)}\n"))
-        chain.append(Comp.Plain(f"🔗 链接: {link}\n"))
+            result_text += f"标签: {', '.join(tags)}\n"
+        result_text += f"🔗 链接: {link}\n"
 
         # 添加完整题目内容
         content = question.get("content", "")
-        content_cn = question.get("contentCn", "")  # 中文内容（如果API支持）
-        
-        if content:
-            clean_content = clean_html(content)
-            chain.append(Comp.Plain(f"\n📝 题目描述:\n"))
+        content_cn = question.get("contentCn", "")  # 中文内容
+        content_cn_failed = question.get("contentCnFailed", False)  # 中文内容获取是否失败
+
+        logger.info(f"[构建消息] 内容处理 - content长度: {len(content) if content else 0}, contentCn长度: {len(content_cn) if content_cn else 0}, 失败: {content_cn_failed}, language: {language}")
+
+        if content or content_cn:
+            clean_content_en = clean_html(content) if content else ""
+            clean_content_cn = clean_html(content_cn) if content_cn else ""
             
             # 根据语言设置显示内容
-            if language == "zh" and content_cn:
-                # 优先显示中文内容
-                display_content = clean_html(content_cn)
-            elif language == "en":
-                # 仅显示英文
-                display_content = clean_content
+            if language == "zh":
+                logger.info(f"[构建消息] 语言=zh，clean_content_cn长度: {len(clean_content_cn)}, clean_content_en长度: {len(clean_content_en)}")
+                if clean_content_cn:
+                    # 仅中文
+                    logger.info("[构建消息] 使用中文内容")
+                    result_text += f"\n📝 题目描述:\n"
+                    display_content = clean_content_cn
+                    # 分段发送，避免消息过长
+                    max_length = 3000
+                    if len(display_content) > max_length:
+                        result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                    else:
+                        result_text += display_content
+                elif clean_content_en:
+                    # 中文内容获取失败，显示提示和英文内容
+                    logger.info("[构建消息] 中文内容为空，使用英文内容")
+                    if content_cn_failed:
+                        result_text += f"\n⚠️ 中文内容获取失败，已切换为英文显示\n"
+                    result_text += f"\n📝 Description:\n"
+                    display_content = clean_content_en
+                    max_length = 3000
+                    if len(display_content) > max_length:
+                        result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                    else:
+                        result_text += display_content
+                    
+            elif language == "en" and clean_content_en:
+                # 仅英文
+                result_text += f"\n📝 题目描述:\n"
+                display_content = clean_content_en
+                max_length = 3000
+                if len(display_content) > max_length:
+                    result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                else:
+                    result_text += display_content
+                    
+            elif language == "both":
+                # 双语模式 - 同时显示中英文
+                # 中文部分
+                if clean_content_cn:
+                    result_text += f"\n📝 题目描述 (中文):\n"
+                    max_length = 1500
+                    if len(clean_content_cn) > max_length:
+                        result_text += clean_content_cn[:max_length] + "\n\n... (内容已截断)"
+                    else:
+                        result_text += clean_content_cn
+                elif content_cn_failed:
+                    # 中文内容获取失败提示
+                    result_text += f"\n⚠️ 中文内容获取失败\n"
+                
+                # 英文部分
+                if clean_content_en:
+                    result_text += f"\n\n📝 Description (English):\n"
+                    max_length = 1500
+                    if len(clean_content_en) > max_length:
+                        result_text += clean_content_en[:max_length] + "\n\n... (content truncated)"
+                    else:
+                        result_text += clean_content_en
             else:
-                # 双语或默认显示英文内容
-                display_content = clean_content
-            
-            # 分段发送，避免消息过长，上限3000字符
-            max_length = 3000
-            if len(display_content) > max_length:
-                chain.append(Comp.Plain(display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"))
-            else:
-                chain.append(Comp.Plain(display_content))
+                # 默认显示可用内容
+                result_text += f"\n📝 题目描述:\n"
+                display_content = clean_content_cn or clean_content_en
+                max_length = 3000
+                if len(display_content) > max_length:
+                    result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                else:
+                    result_text += display_content
 
-        return chain
+        return result_text
 
     async def _send_question_to_subscribers(self, question: Dict):
         """发送题目到所有群组订阅者"""
-        chain = self._build_question_message(question, self.default_language)
+        text = self._build_question_message(question, self.default_language)
 
         for group_id in self.subscribed_groups:
             try:
                 await self.context.send_message(
                     self._get_session_for_group(group_id),
-                    MessageChain(chain)
+                    text
                 )
                 logger.info(f"LeetCode 每日一题已发送到群 {group_id}")
                 await asyncio.sleep(1)
@@ -554,11 +771,11 @@ class LeetCodePlugin(Star):
             try:
                 # 获取用户的语言偏好
                 user_lang = self._get_user_language(user_id)
-                chain = self._build_question_message(question, user_lang)
+                text = self._build_question_message(question, user_lang)
                 
                 await self.context.send_message(
                     self._get_session_for_user(user_id),
-                    MessageChain(chain)
+                    text
                 )
                 logger.info(f"LeetCode 每日一题已发送到用户 {user_id}")
                 await asyncio.sleep(1)
@@ -568,8 +785,7 @@ class LeetCodePlugin(Star):
     async def _send_plain_text(self, group_id: str, text: str):
         """发送纯文本消息"""
         try:
-            chain = [Comp.Plain(text)]
-            await self.context.send_message(self._get_session_for_group(group_id), MessageChain(chain))
+            await self.context.send_message(self._get_session_for_group(group_id), text)
         except Exception as e:
             logger.error(f"发送消息到群 {group_id} 失败: {e}")
 
@@ -601,7 +817,9 @@ class LeetCodePlugin(Star):
 ➕ /lc订阅 - 在当前群订阅每日一题
 ➖ /lc退订 - 在当前群取消订阅
 📋 /lc全部订阅 - 查看所有群的订阅
-📖 /lc帮助 - 查看详细帮助"""
+📖 /lc帮助 - 查看详细帮助
+
+⚠️ 注意：中文题目内容依赖大模型API实时翻译，请确保已配置LLM提供商"""
         else:
             # 私聊环境 - 个人订阅功能
             msg = """🤖 LeetCode 每日一题 - 个人菜单
@@ -622,7 +840,9 @@ class LeetCodePlugin(Star):
    示例: /lc语言 en (仅英文)
    示例: /lc语言 both (双语显示)
 
-📖 /lc帮助 - 查看详细帮助"""
+📖 /lc帮助 - 查看详细帮助
+
+⚠️ 注意：中文题目内容依赖大模型API实时翻译，请确保已配置LLM提供商"""
 
         yield event.plain_result(msg)
 
@@ -674,9 +894,11 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 - 默认每日 09:00 推送
 - 可在插件配置中修改推送时间
 
-【提示】
-- 只有管理员可以使用管理命令
-- 每日一题数据来自 LeetCode 中文站"""
+【重要提示】
+⚠️ 中文题目内容依赖大模型API实时翻译
+- 请确保AstrBot已配置LLM提供商
+- 翻译功能可在配置中开启/关闭
+- 如翻译失败将显示英文内容"""
         else:
             # 私聊帮助
             msg = """📖 LeetCode 每日一题 - 个人使用说明
@@ -705,10 +927,12 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 /lc解题命令需要AstrBot已配置LLM提供商
 AI会提供：题目理解、解题思路、算法步骤、参考代码、关键点
 
-【提示】
-- 个人订阅推送时间可在插件配置中修改
-- 语言偏好仅影响个人收到的题目显示
-- 每日一题数据来自 LeetCode 中文站"""
+【重要提示】
+⚠️ 中文题目内容依赖大模型API实时翻译
+- 请确保AstrBot已配置LLM提供商
+- 翻译功能可在配置中开启/关闭
+- 如翻译失败将显示英文内容
+- 建议选择适合翻译的LLM模型（如GPT-4、Claude等）"""
 
         yield event.plain_result(msg)
 
@@ -795,8 +1019,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         else:
             language = self._get_user_language(user_id)
 
-        chain = self._build_question_message(question, language)
-        yield event.chain_result(chain)
+        text = self._build_question_message(question, language)
+        yield event.plain_result(text)
 
     @filter.command("lc列表")
     async def cmd_list(self, event: AstrMessageEvent):
@@ -1031,8 +1255,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
                 return
 
-            chain = self._build_question_message(question, language)
-            yield event.chain_result(chain)
+            text = self._build_question_message(question, language)
+            yield event.plain_result(text)
         else:
             # 提供了题目号，查询指定题目
             yield event.plain_result(f"⏳ 正在查询题目 {question_id}...")
@@ -1043,8 +1267,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
                 return
 
-            chain = self._build_question_message(question, language)
-            yield event.chain_result(chain)
+            text = self._build_question_message(question, language)
+            yield event.plain_result(text)
 
     @filter.command("lc解题")
     async def cmd_solve(self, event: AstrMessageEvent, question_id: str = ""):
