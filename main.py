@@ -578,9 +578,9 @@ class LeetCodePlugin(Star):
 
             data = json.loads(response_text)
 
-            # 获取英文标题和内容
+            # 获取英文标题和内容（lcid.cc 返回的是 titleSlug 字段）
             title = data.get("title", "")
-            slug = data.get("slug", "")
+            slug = data.get("titleSlug", "")
             content_en = data.get("content", "")
             
             logger.info(f"[题目查询] 英文内容 - 标题: {title}, slug: {slug}, 内容长度: {len(content_en) if content_en else 0}")
