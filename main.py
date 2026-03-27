@@ -9,7 +9,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -56,9 +56,15 @@ class LeetCodePlugin(Star):
         # 配置文件路径
         self.config_file = os.path.join(self.data_dir, "config.json")
         self.subscription_file = os.path.join(self.data_dir, "subscription.json")
+        self.personal_subscription_file = os.path.join(self.data_dir, "personal_subscription.json")
 
         # 保存群的 unified_msg_origin
         self.group_origins: Dict[str, str] = {}
+
+        # 个人订阅相关数据结构
+        self.user_origins: Dict[str, str] = {}  # 保存用户的 unified_msg_origin
+        self.subscribed_users: List[str] = []   # 订阅用户ID列表
+        self.user_language_prefs: Dict[str, str] = {}  # 用户语言偏好设置
 
         # 加载配置
         self._load_config()
@@ -122,6 +128,20 @@ class LeetCodePlugin(Star):
             if admin_from_config:
                 default_config["admin_users"] = [str(u) for u in admin_from_config]
 
+            # 加载多语言和个人订阅配置
+            default_config["default_language"] = self.config.get(
+                "leetcode_default_language", default_config.get("default_language", "zh")
+            )
+            default_config["enable_personal_subscribe"] = self.config.get(
+                "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
+            )
+            default_config["personal_inform_hour"] = self.config.get(
+                "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
+            )
+            default_config["personal_inform_minute"] = self.config.get(
+                "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
+            )
+
         # 加载订阅配置（动态修改的）
         if os.path.exists(self.subscription_file):
             try:
@@ -141,6 +161,15 @@ class LeetCodePlugin(Star):
         self.inform_minute = default_config["inform_minute"]
         self.admin_users = default_config["admin_users"]
         self.subscribed_groups = default_config["subscribed_groups"]
+
+        # 多语言和个人订阅配置
+        self.default_language = default_config.get("default_language", "zh")
+        self.enable_personal_subscribe = default_config.get("enable_personal_subscribe", True)
+        self.personal_inform_hour = default_config.get("personal_inform_hour", 9)
+        self.personal_inform_minute = default_config.get("personal_inform_minute", 30)
+
+        # 加载个人订阅配置
+        self._load_personal_subscription()
 
     def _get_group_id(self, event: AstrMessageEvent) -> Optional[str]:
         """获取群组ID"""
@@ -167,6 +196,54 @@ class LeetCodePlugin(Star):
             return True
         sender_id = str(event.get_sender_id())
         return sender_id in ADMIN_USERS
+
+    def _load_personal_subscription(self):
+        """加载个人订阅配置"""
+        if os.path.exists(self.personal_subscription_file):
+            try:
+                with open(self.personal_subscription_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.subscribed_users = data.get("subscribed_users", [])
+                    self.user_origins = data.get("user_origins", {})
+                    self.user_language_prefs = data.get("user_language_prefs", {})
+            except json.JSONDecodeError as e:
+                logger.error(f"个人订阅配置JSON格式错误: {e}")
+            except Exception as e:
+                logger.error(f"加载个人订阅配置失败: {e}")
+
+    async def _save_personal_subscription(self):
+        """保存个人订阅配置"""
+        async with self._file_lock:
+            try:
+                data = {
+                    "subscribed_users": self.subscribed_users,
+                    "user_origins": self.user_origins,
+                    "user_language_prefs": self.user_language_prefs
+                }
+                with open(self.personal_subscription_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.error(f"保存个人订阅配置失败: {e}")
+
+    def _get_user_id(self, event: AstrMessageEvent) -> str:
+        """获取用户ID"""
+        return str(event.get_sender_id())
+
+    def _save_user_origin(self, event: AstrMessageEvent):
+        """保存用户的统一会话标识"""
+        user_id = self._get_user_id(event)
+        if hasattr(event, 'unified_msg_origin'):
+            self.user_origins[user_id] = event.unified_msg_origin
+
+    def _get_session_for_user(self, user_id: str) -> str:
+        """获取用户的会话标识"""
+        if user_id in self.user_origins:
+            return self.user_origins[user_id]
+        return user_id
+
+    def _get_user_language(self, user_id: str) -> str:
+        """获取用户的语言偏好，如果没有设置则使用默认语言"""
+        return self.user_language_prefs.get(user_id, self.default_language)
 
     async def _save_subscription(self):
         """保存订阅配置"""
@@ -197,7 +274,8 @@ class LeetCodePlugin(Star):
     async def _async_monitor(self):
         """异步监控任务"""
         logger.info("LeetCode 每日一题监控任务已启动")
-        last_inform_date = ""
+        last_inform_date = ""      # 群组推送日期记录
+        last_personal_inform_date = ""  # 个人推送日期记录
 
         try:
             while True:
@@ -205,19 +283,34 @@ class LeetCodePlugin(Star):
                     now = datetime.now()
                     today_date = now.strftime("%Y-%m-%d")
 
-                    # 检查是否需要通知
+                    # 检查群组订阅推送时间
                     if (now.hour == self.inform_hour and
                         now.minute == self.inform_minute and
                         today_date != last_inform_date):
 
-                        logger.info(f"开始获取 LeetCode 每日一题: {today_date}")
+                        logger.info(f"开始获取 LeetCode 每日一题(群组): {today_date}")
                         question = await self._fetch_daily_question()
                         if question:
                             self.today_question = question
                             self.today_date = today_date
                             await self._send_question_to_subscribers(question)
                             last_inform_date = today_date
-                            logger.info(f"LeetCode 每日一题已推送: {question.get('title', '未知')}")
+                            logger.info(f"LeetCode 每日一题已推送到群组: {question.get('title', '未知')}")
+
+                    # 检查个人订阅推送时间（可以设置不同时间）
+                    if (self.enable_personal_subscribe and
+                        now.hour == self.personal_inform_hour and
+                        now.minute == self.personal_inform_minute and
+                        today_date != last_personal_inform_date):
+
+                        logger.info(f"开始获取 LeetCode 每日一题(个人): {today_date}")
+                        question = await self._fetch_daily_question()
+                        if question:
+                            self.today_question = question
+                            self.today_date = today_date
+                            await self._send_question_to_personal_subscribers(question)
+                            last_personal_inform_date = today_date
+                            logger.info(f"LeetCode 每日一题已推送到个人: {question.get('title', '未知')}")
 
                 except Exception as e:
                     logger.error(f"LeetCode 监控任务出错: {e}")
@@ -351,8 +444,13 @@ class LeetCodePlugin(Star):
 
         return None
 
-    def _build_question_message(self, question: Dict) -> List:
-        """构建题目消息"""
+    def _build_question_message(self, question: Dict, language: str = "zh") -> List:
+        """构建题目消息，支持多语言显示
+        
+        Args:
+            question: 题目数据字典
+            language: 语言选项 - "zh"(中文), "en"(英文), "both"(双语)
+        """
         chain = []
 
         difficulty_emoji = {
@@ -385,10 +483,21 @@ class LeetCodePlugin(Star):
             else:
                 tags.append(str(tag))
 
+        # 根据语言设置构建标题
         chain.append(Comp.Plain(f"📅 {question.get('date', '')}\n"))
-        chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
-        if title_cn != title:
-            chain.append(Comp.Plain(f"英文标题: {title}\n"))
+        
+        if language == "zh":
+            # 仅中文
+            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+        elif language == "en":
+            # 仅英文
+            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title}】\n"))
+        else:
+            # 双语模式
+            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+            if title_cn != title:
+                chain.append(Comp.Plain(f"English: {title}\n"))
+
         chain.append(Comp.Plain(f"难度: {difficulty_cn_text}\n"))
         if ac_rate:
             chain.append(Comp.Plain(f"通过率: {ac_rate * 100:.1f}%\n"))
@@ -398,21 +507,35 @@ class LeetCodePlugin(Star):
 
         # 添加完整题目内容
         content = question.get("content", "")
+        content_cn = question.get("contentCn", "")  # 中文内容（如果API支持）
+        
         if content:
             clean_content = clean_html(content)
             chain.append(Comp.Plain(f"\n📝 题目描述:\n"))
+            
+            # 根据语言设置显示内容
+            if language == "zh" and content_cn:
+                # 优先显示中文内容
+                display_content = clean_html(content_cn)
+            elif language == "en":
+                # 仅显示英文
+                display_content = clean_content
+            else:
+                # 双语或默认显示英文内容
+                display_content = clean_content
+            
             # 分段发送，避免消息过长，上限3000字符
             max_length = 3000
-            if len(clean_content) > max_length:
-                chain.append(Comp.Plain(clean_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"))
+            if len(display_content) > max_length:
+                chain.append(Comp.Plain(display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"))
             else:
-                chain.append(Comp.Plain(clean_content))
+                chain.append(Comp.Plain(display_content))
 
         return chain
 
     async def _send_question_to_subscribers(self, question: Dict):
-        """发送题目到所有订阅者"""
-        chain = self._build_question_message(question)
+        """发送题目到所有群组订阅者"""
+        chain = self._build_question_message(question, self.default_language)
 
         for group_id in self.subscribed_groups:
             try:
@@ -424,6 +547,23 @@ class LeetCodePlugin(Star):
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"发送题目到群 {group_id} 失败: {e}")
+
+    async def _send_question_to_personal_subscribers(self, question: Dict):
+        """发送题目到所有个人订阅者"""
+        for user_id in self.subscribed_users:
+            try:
+                # 获取用户的语言偏好
+                user_lang = self._get_user_language(user_id)
+                chain = self._build_question_message(question, user_lang)
+                
+                await self.context.send_message(
+                    self._get_session_for_user(user_id),
+                    MessageChain(chain)
+                )
+                logger.info(f"LeetCode 每日一题已发送到用户 {user_id}")
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"发送题目到用户 {user_id} 失败: {e}")
 
     async def _send_plain_text(self, group_id: str, text: str):
         """发送纯文本消息"""
@@ -439,11 +579,17 @@ class LeetCodePlugin(Star):
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示主菜单"""
         self._save_group_origin(event)
-        if not self._is_admin(event):
-            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
-            return
 
-        msg = """🤖 LeetCode 每日一题 - 主菜单
+        # 判断当前是群聊还是私聊
+        group_id = self._get_group_id(event)
+        
+        if group_id:
+            # 群聊环境 - 需要管理员权限
+            if not self._is_admin(event):
+                yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+                return
+
+            msg = """🤖 LeetCode 每日一题 - 主菜单
 
 【查询命令】
 📋 /lc今日 - 立即获取今日题目（含完整描述）
@@ -456,18 +602,49 @@ class LeetCodePlugin(Star):
 ➖ /lc退订 - 在当前群取消订阅
 📋 /lc全部订阅 - 查看所有群的订阅
 📖 /lc帮助 - 查看详细帮助"""
+        else:
+            # 私聊环境 - 个人订阅功能
+            msg = """🤖 LeetCode 每日一题 - 个人菜单
+
+【查询命令】
+📋 /lc今日 - 立即获取今日题目（含完整描述）
+🔍 /lc题目 [题号] - 查询指定题目（如: /lc题目 1）
+🤖 /lc解题 [题号] - 使用AI分析并解答题目（如: /lc解题 1）
+
+【个人订阅】
+➕ /lc订阅我 - 订阅每日一题私信推送
+➖ /lc退订我 - 取消个人订阅
+📋 /lc我的状态 - 查看个人订阅状态
+
+【语言设置】
+🌐 /lc语言 [zh/en/both] - 设置题目显示语言
+   示例: /lc语言 zh (仅中文)
+   示例: /lc语言 en (仅英文)
+   示例: /lc语言 both (双语显示)
+
+📖 /lc帮助 - 查看详细帮助"""
 
         yield event.plain_result(msg)
 
     @filter.command("lc帮助")
     async def cmd_help(self, event: AstrMessageEvent):
         """显示详细帮助"""
-        self._save_group_origin(event)
-        if not self._is_admin(event):
+        group_id = self._get_group_id(event)
+
+        # 群聊需要管理员权限，私聊无需权限
+        if group_id and not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
 
-        msg = """📖 LeetCode 每日一题 - 详细使用说明
+        # 保存会话标识
+        if group_id:
+            self._save_group_origin(event)
+        else:
+            self._save_user_origin(event)
+
+        if group_id:
+            # 群聊帮助
+            msg = """📖 LeetCode 每日一题 - 群组使用说明
 
 【查询命令】
 1️⃣ /lc今日 - 立即获取并显示今日题目（含完整描述）
@@ -488,12 +665,49 @@ class LeetCodePlugin(Star):
 /lc解题命令需要AstrBot已配置LLM提供商（如OpenAI、Claude等）
 AI会提供：题目理解、解题思路、算法步骤、参考代码、关键点
 
+【个人订阅】
+私聊我还可以使用个人订阅功能:
+• /lc订阅我 - 私信接收每日题目
+• /lc语言 - 设置题目显示语言
+
 【配置】
 - 默认每日 09:00 推送
 - 可在插件配置中修改推送时间
 
 【提示】
 - 只有管理员可以使用管理命令
+- 每日一题数据来自 LeetCode 中文站"""
+        else:
+            # 私聊帮助
+            msg = """📖 LeetCode 每日一题 - 个人使用说明
+
+【查询命令】
+1️⃣ /lc今日 - 立即获取并显示今日题目
+2️⃣ /lc题目 [题号] - 查询指定题号的题目
+   示例: /lc题目 1 (查询两数之和)
+3️⃣ /lc解题 [题号] - 使用AI分析题目并提供解题思路
+   示例: /lc解题 1 (AI解答两数之和)
+
+【个人订阅命令】
+4️⃣ /lc订阅我 - 订阅每日一题私信推送
+   每天会自动收到题目推送
+5️⃣ /lc退订我 - 取消个人订阅
+6️⃣ /lc我的状态 - 查看订阅状态和语言设置
+
+【语言设置】
+7️⃣ /lc语言 [zh/en/both] - 设置题目显示语言
+   • zh   - 仅中文
+   • en   - 仅英文
+   • both - 双语显示
+   示例: /lc语言 zh
+
+【AI解题说明】
+/lc解题命令需要AstrBot已配置LLM提供商
+AI会提供：题目理解、解题思路、算法步骤、参考代码、关键点
+
+【提示】
+- 个人订阅推送时间可在插件配置中修改
+- 语言偏好仅影响个人收到的题目显示
 - 每日一题数据来自 LeetCode 中文站"""
 
         yield event.plain_result(msg)
@@ -545,10 +759,19 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
     @filter.command("lc今日")
     async def cmd_today(self, event: AstrMessageEvent):
         """获取今日题目"""
-        self._save_group_origin(event)
-        if not self._is_admin(event):
+        group_id = self._get_group_id(event)
+        user_id = self._get_user_id(event)
+
+        # 群聊需要管理员权限，私聊无需权限
+        if group_id and not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
+
+        # 保存会话标识
+        if group_id:
+            self._save_group_origin(event)
+        else:
+            self._save_user_origin(event)
 
         today_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -566,7 +789,13 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
             return
 
-        chain = self._build_question_message(question)
+        # 根据用户或群组设置选择语言
+        if group_id:
+            language = self.default_language
+        else:
+            language = self._get_user_language(user_id)
+
+        chain = self._build_question_message(question, language)
         yield event.chain_result(chain)
 
     @filter.command("lc列表")
@@ -606,13 +835,183 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("lc题目")
-    async def cmd_question(self, event: AstrMessageEvent, question_id: str = ""):
-        """根据题目号查询题目，不传参数则获取今日题目"""
-        self._save_group_origin(event)
+    # ========== 多语言配置命令 ==========
+
+    @filter.command("lc语言")
+    async def cmd_set_language(self, event: AstrMessageEvent, language: str = ""):
+        """设置题目显示语言: /lc语言 [zh/en/both]"""
+        self._save_user_origin(event)
+        user_id = self._get_user_id(event)
+
+        if not language:
+            # 显示当前语言设置
+            current_lang = self._get_user_language(user_id)
+            lang_desc = {"zh": "中文", "en": "英文", "both": "双语"}
+            yield event.plain_result(
+                f"🌐 您当前的语言设置: {lang_desc.get(current_lang, current_lang)} ({current_lang})\n\n"
+                f"可用选项:\n"
+                f"• zh - 仅中文\n"
+                f"• en - 仅英文\n"
+                f"• both - 双语显示\n\n"
+                f"用法: /lc语言 [zh/en/both]"
+            )
+            return
+
+        language = language.lower().strip()
+        if language not in ["zh", "en", "both"]:
+            yield event.plain_result(
+                "❌ 无效的语言选项\n\n"
+                "可用选项:\n"
+                "• zh - 仅中文\n"
+                "• en - 仅英文\n"
+                "• both - 双语显示"
+            )
+            return
+
+        # 保存用户语言偏好
+        self.user_language_prefs[user_id] = language
+        await self._save_personal_subscription()
+
+        lang_desc = {"zh": "中文", "en": "英文", "both": "双语"}
+        yield event.plain_result(
+            f"✅ 语言设置已更新为: {lang_desc.get(language, language)}\n"
+            f"后续收到的题目将以所选语言显示。"
+        )
+
+    # ========== 个人订阅管理命令 ==========
+
+    @filter.command("lc订阅我")
+    async def cmd_subscribe_me(self, event: AstrMessageEvent):
+        """个人订阅每日一题"""
+        if not self.enable_personal_subscribe:
+            yield event.plain_result("❌ 个人订阅功能已禁用")
+            return
+
+        self._save_user_origin(event)
+        user_id = self._get_user_id(event)
+
+        # 检查是否在群聊中使用
+        if self._get_group_id(event):
+            yield event.plain_result("❌ 此命令只能在私聊中使用\n请直接私信我发送 /lc订阅我")
+            return
+
+        if user_id in self.subscribed_users:
+            yield event.plain_result(
+                "❌ 您已经订阅了 LeetCode 每日一题\n\n"
+                f"每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d} 会推送题目到您的私信"
+            )
+            return
+
+        self.subscribed_users.append(user_id)
+        await self._save_personal_subscription()
+
+        yield event.plain_result(
+            f"✅ 订阅成功！\n\n"
+            f"您已成功订阅 LeetCode 每日一题\n"
+            f"每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d} 会推送题目到您的私信\n\n"
+            f"其他命令:\n"
+            f"• /lc语言 - 设置题目显示语言\n"
+            f"• /lc退订我 - 取消订阅\n"
+            f"• /lc今日 - 立即获取今日题目"
+        )
+
+    @filter.command("lc退订我")
+    async def cmd_unsubscribe_me(self, event: AstrMessageEvent):
+        """取消个人订阅"""
+        self._save_user_origin(event)
+        user_id = self._get_user_id(event)
+
+        # 检查是否在群聊中使用
+        if self._get_group_id(event):
+            yield event.plain_result("❌ 此命令只能在私聊中使用\n请直接私信我发送 /lc退订我")
+            return
+
+        if user_id not in self.subscribed_users:
+            yield event.plain_result("❌ 您没有订阅 LeetCode 每日一题")
+            return
+
+        self.subscribed_users.remove(user_id)
+        await self._save_personal_subscription()
+
+        yield event.plain_result("✅ 已取消订阅 LeetCode 每日一题\n期待您再次使用！")
+
+    @filter.command("lc我的状态")
+    async def cmd_my_status(self, event: AstrMessageEvent):
+        """查看个人订阅状态"""
+        self._save_user_origin(event)
+        user_id = self._get_user_id(event)
+
+        # 检查是否在群聊中使用
+        if self._get_group_id(event):
+            yield event.plain_result("❌ 此命令只能在私聊中使用\n请直接私信我发送 /lc我的状态")
+            return
+
+        # 获取用户语言偏好
+        current_lang = self._get_user_language(user_id)
+        lang_desc = {"zh": "中文", "en": "英文", "both": "双语"}
+
+        lines = ["📊 您的个人订阅状态"]
+        lines.append("=" * 30)
+
+        # 订阅状态
+        if user_id in self.subscribed_users:
+            lines.append("✅ 订阅状态: 已订阅")
+            lines.append(f"📅 推送时间: 每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d}")
+        else:
+            lines.append("❌ 订阅状态: 未订阅")
+            lines.append("💡 使用 /lc订阅我 可以订阅每日推送")
+
+        lines.append(f"🌐 语言偏好: {lang_desc.get(current_lang, current_lang)}")
+        lines.append("")
+        lines.append("可用命令:")
+        lines.append("• /lc订阅我 - 订阅推送")
+        lines.append("• /lc退订我 - 取消订阅")
+        lines.append("• /lc语言 [zh/en/both] - 设置语言")
+        lines.append("• /lc今日 - 获取今日题目")
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("lc全部个人订阅")
+    async def cmd_all_personal_subscriptions(self, event: AstrMessageEvent):
+        """查看所有个人订阅（管理员命令）"""
         if not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
+
+        if not self.subscribed_users:
+            yield event.plain_result("📋 暂无个人订阅 LeetCode 每日一题")
+            return
+
+        lines = ["📋 已订阅 LeetCode 每日一题的用户:"]
+        lines.append("=" * 30)
+        for i, user_id in enumerate(self.subscribed_users, 1):
+            lang = self._get_user_language(user_id)
+            lines.append(f"{i}. {user_id} (语言: {lang})")
+
+        lines.append("")
+        lines.append(f"总计: {len(self.subscribed_users)} 人")
+
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("lc题目")
+    async def cmd_question(self, event: AstrMessageEvent, question_id: str = ""):
+        """根据题目号查询题目，不传参数则获取今日题目"""
+        group_id = self._get_group_id(event)
+        user_id = self._get_user_id(event)
+
+        # 群聊需要管理员权限，私聊无需权限
+        if group_id and not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
+
+        # 保存会话标识
+        if group_id:
+            self._save_group_origin(event)
+        else:
+            self._save_user_origin(event)
+
+        # 获取语言设置
+        language = self.default_language if group_id else self._get_user_language(user_id)
 
         if not question_id:
             # 没有提供题目号，获取今日题目
@@ -632,7 +1031,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
                 return
 
-            chain = self._build_question_message(question)
+            chain = self._build_question_message(question, language)
             yield event.chain_result(chain)
         else:
             # 提供了题目号，查询指定题目
@@ -644,16 +1043,28 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
                 return
 
-            chain = self._build_question_message(question)
+            chain = self._build_question_message(question, language)
             yield event.chain_result(chain)
 
     @filter.command("lc解题")
     async def cmd_solve(self, event: AstrMessageEvent, question_id: str = ""):
         """使用AI分析并解答题目，不传参数则解答今日题目"""
-        self._save_group_origin(event)
-        if not self._is_admin(event):
+        group_id = self._get_group_id(event)
+        user_id = self._get_user_id(event)
+
+        # 群聊需要管理员权限，私聊无需权限
+        if group_id and not self._is_admin(event):
             yield event.plain_result("⚠️ 只有管理员可以使用此命令")
             return
+
+        # 保存会话标识
+        if group_id:
+            self._save_group_origin(event)
+        else:
+            self._save_user_origin(event)
+
+        # 获取语言设置
+        language = self.default_language if group_id else self._get_user_language(user_id)
 
         if not question_id:
             # 没有提供题目号，获取今日题目
@@ -702,6 +1113,13 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         yield event.plain_result("🤖 正在使用AI分析题目，请稍候...")
 
         try:
+            # 根据语言设置调整回答语言
+            lang_instruction = {
+                "zh": "请用中文回答。",
+                "en": "Please answer in English.",
+                "both": "请用中文回答，并在关键术语后附上英文对照。"
+            }.get(language, "请用中文回答。")
+
             # 构建提示词
             prompt = f"""请作为算法专家，分析并解答以下LeetCode题目：
 
@@ -720,7 +1138,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 4. 参考代码：提供Python实现（包含注释）
 5. 关键点：总结解题的关键要点
 
-请用中文回答。"""
+{lang_instruction}"""
 
             # 调用LLM
             umo = event.unified_msg_origin

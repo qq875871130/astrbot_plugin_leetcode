@@ -4,5 +4,30 @@
     "type": "list",
     "hint": "可以管理插件的管理员用户ID列表",
     "default": []
+  },
+  "default_language": {
+    "description": "默认题目语言",
+    "type": "string",
+    "hint": "题目显示的语言：zh(中文)、en(英文)、both(双语)",
+    "default": "zh",
+    "enum": ["zh", "en", "both"]
+  },
+  "enable_personal_subscribe": {
+    "description": "启用个人订阅功能",
+    "type": "boolean",
+    "hint": "是否允许用户进行个人订阅（私信接收题目）",
+    "default": true
+  },
+  "personal_inform_hour": {
+    "description": "个人订阅推送时间（小时）",
+    "type": "int",
+    "hint": "个人订阅者接收题目的时间（0-23）",
+    "default": 9
+  },
+  "personal_inform_minute": {
+    "description": "个人订阅推送时间（分钟）",
+    "type": "int",
+    "hint": "个人订阅者接收题目的时间（0-59）",
+    "default": 30
   }
 }
