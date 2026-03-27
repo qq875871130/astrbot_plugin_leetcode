@@ -328,7 +328,7 @@ class LeetCodePlugin(Star):
             import ssl
 
             url = "https://leetcode-api-pied.vercel.app/daily"
-            logger.info(f"正在向 {url} 发送请求")
+            logger.info(f"[每日一题] 开始获取，URL: {url}")
 
             # 创建SSL上下文，忽略证书验证
             ssl_context = ssl.create_default_context()
@@ -349,31 +349,44 @@ class LeetCodePlugin(Star):
                     return response.read().decode('utf-8')
 
             response_text = await loop.run_in_executor(None, fetch)
-            logger.info(f"响应内容: {response_text[:200]}")
+            logger.info(f"[每日一题] API 原始响应: {response_text[:500]}...")
 
             data = json.loads(response_text)
             question = data.get("question", {})
             link = data.get("link", "")
             title_slug = question.get("titleSlug")
 
+            logger.info(f"[每日一题] 解析数据 - titleSlug: {title_slug}, link: {link}")
+            logger.info(f"[每日一题] question 对象 keys: {list(question.keys())}")
+
             # 获取标题（优先使用中文标题，如果没有则使用英文）
             title = question.get("title", "")
             title_cn = question.get("translatedTitle")
+            logger.info(f"[每日一题] 标题 - title: {title}, translatedTitle: {title_cn}")
             if not title_cn:
                 title_cn = title
 
             # 获取题目内容（HTML格式，需要清理）
             content_html = question.get("content", "")
+            logger.info(f"[每日一题] 英文内容长度: {len(content_html) if content_html else 0}")
 
             # 尝试获取中文内容
             content_cn = ""
             content_cn_failed = False
+            logger.info(f"[每日一题] 准备获取中文内容，title_slug: {title_slug}")
             if title_slug:
                 try:
                     content_cn = await self._fetch_chinese_content(title_slug)
+                    if content_cn:
+                        logger.info(f"[每日一题] 中文内容获取成功，长度: {len(content_cn)}")
+                    else:
+                        logger.warning(f"[每日一题] 中文内容为空")
+                        content_cn_failed = True
                 except Exception as e:
-                    logger.warning(f"获取中文内容失败: {e}")
+                    logger.warning(f"[每日一题] 获取中文内容失败: {e}")
                     content_cn_failed = True
+            else:
+                logger.warning(f"[每日一题] 没有 title_slug，跳过中文内容获取")
 
             result = {
                 "date": data.get("date"),
@@ -390,10 +403,10 @@ class LeetCodePlugin(Star):
                 "contentCnFailed": content_cn_failed
             }
 
-            logger.info(f"成功获取题目: {title_cn or title}")
+            logger.info(f"[每日一题] 最终结果 - 标题: {title_cn or title}, content长度: {len(content_html) if content_html else 0}, contentCn长度: {len(content_cn) if content_cn else 0}, 失败: {content_cn_failed}")
             return result
         except Exception as e:
-            logger.error(f"获取 LeetCode 每日一题失败: {e}", exc_info=True)
+            logger.error(f"[每日一题] 获取 LeetCode 每日一题失败: {e}", exc_info=True)
 
         return None
 
@@ -405,6 +418,7 @@ class LeetCodePlugin(Star):
 
             # LeetCode 中国站 GraphQL API
             url = "https://leetcode.cn/graphql"
+            logger.info(f"[中文内容] 开始获取，title_slug: {title_slug}, URL: {url}")
 
             # GraphQL 查询
             query = {
@@ -418,6 +432,7 @@ class LeetCodePlugin(Star):
             }
 
             data = json.dumps(query).encode('utf-8')
+            logger.info(f"[中文内容] 请求体: {json.dumps(query)}")
 
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
@@ -438,14 +453,20 @@ class LeetCodePlugin(Star):
                     return response.read().decode('utf-8')
 
             response_text = await loop.run_in_executor(None, fetch)
+            logger.info(f"[中文内容] API 原始响应: {response_text[:500]}...")
+
             response_data = json.loads(response_text)
+            logger.info(f"[中文内容] 解析后数据: {response_data}")
 
             question_data = response_data.get("data", {}).get("question", {})
+            logger.info(f"[中文内容] question_data: {question_data}")
+
             translated_content = question_data.get("translatedContent", "")
+            logger.info(f"[中文内容] translatedContent 长度: {len(translated_content) if translated_content else 0}")
 
             return translated_content
         except Exception as e:
-            logger.warning(f"获取中文内容失败: {e}")
+            logger.warning(f"[中文内容] 获取失败: {e}")
             return ""
 
     async def _fetch_question_by_id(self, question_id: str) -> Optional[Dict]:
@@ -531,6 +552,8 @@ class LeetCodePlugin(Star):
             question: 题目数据字典
             language: 语言选项 - "zh"(中文), "en"(英文), "both"(双语)
         """
+        logger.info(f"[构建消息] 开始构建，language: {language}, question.keys: {list(question.keys())}")
+
         result_text = f"📅 {question.get('date', '')}\n"
 
         difficulty_emoji = {
@@ -587,15 +610,19 @@ class LeetCodePlugin(Star):
         content = question.get("content", "")
         content_cn = question.get("contentCn", "")  # 中文内容
         content_cn_failed = question.get("contentCnFailed", False)  # 中文内容获取是否失败
-        
+
+        logger.info(f"[构建消息] 内容处理 - content长度: {len(content) if content else 0}, contentCn长度: {len(content_cn) if content_cn else 0}, 失败: {content_cn_failed}, language: {language}")
+
         if content or content_cn:
             clean_content_en = clean_html(content) if content else ""
             clean_content_cn = clean_html(content_cn) if content_cn else ""
             
             # 根据语言设置显示内容
             if language == "zh":
+                logger.info(f"[构建消息] 语言=zh，clean_content_cn长度: {len(clean_content_cn)}, clean_content_en长度: {len(clean_content_en)}")
                 if clean_content_cn:
                     # 仅中文
+                    logger.info("[构建消息] 使用中文内容")
                     result_text += f"\n📝 题目描述:\n"
                     display_content = clean_content_cn
                     # 分段发送，避免消息过长
@@ -606,6 +633,7 @@ class LeetCodePlugin(Star):
                         result_text += display_content
                 elif clean_content_en:
                     # 中文内容获取失败，显示提示和英文内容
+                    logger.info("[构建消息] 中文内容为空，使用英文内容")
                     if content_cn_failed:
                         result_text += f"\n⚠️ 中文内容获取失败，已切换为英文显示\n"
                     result_text += f"\n📝 Description:\n"
