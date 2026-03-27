@@ -365,6 +365,14 @@ class LeetCodePlugin(Star):
             # 获取题目内容（HTML格式，需要清理）
             content_html = question.get("content", "")
 
+            # 尝试获取中文内容
+            content_cn = ""
+            if title_slug:
+                try:
+                    content_cn = await self._fetch_chinese_content(title_slug)
+                except Exception as e:
+                    logger.warning(f"获取中文内容失败: {e}")
+
             result = {
                 "date": data.get("date"),
                 "title": title,
@@ -375,15 +383,69 @@ class LeetCodePlugin(Star):
                 "acRate": question.get("acRate", 0) / 100.0 if question.get("acRate") else 0,
                 "link": f"https://leetcode.com{link}" if link.startswith("/") else link,
                 "topicTags": question.get("topicTags", []),
-                "content": content_html
+                "content": content_html,
+                "contentCn": content_cn
             }
 
-            logger.info(f"成功获取题目: {result}")
+            logger.info(f"成功获取题目: {title_cn or title}")
             return result
         except Exception as e:
             logger.error(f"获取 LeetCode 每日一题失败: {e}", exc_info=True)
 
         return None
+
+    async def _fetch_chinese_content(self, title_slug: str) -> str:
+        """从 LeetCode 中国站获取中文题目内容"""
+        try:
+            import urllib.request
+            import ssl
+
+            # LeetCode 中国站 GraphQL API
+            url = "https://leetcode.cn/graphql"
+
+            # GraphQL 查询
+            query = {
+                "operationName": "questionData",
+                "variables": {"titleSlug": title_slug},
+                "query": """query questionData($titleSlug: String!) {
+                    question(titleSlug: $titleSlug) {
+                        translatedContent
+                    }
+                }"""
+            }
+
+            data = json.dumps(query).encode('utf-8')
+
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+            loop = asyncio.get_event_loop()
+
+            def fetch():
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Content-Type': 'application/json',
+                        'Referer': f'https://leetcode.cn/problems/{title_slug}/'
+                    },
+                    method='POST'
+                )
+                with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                    return response.read().decode('utf-8')
+
+            response_text = await loop.run_in_executor(None, fetch)
+            response_data = json.loads(response_text)
+
+            question_data = response_data.get("data", {}).get("question", {})
+            translated_content = question_data.get("translatedContent", "")
+
+            return translated_content
+        except Exception as e:
+            logger.warning(f"获取中文内容失败: {e}")
+            return ""
 
     async def _fetch_question_by_id(self, question_id: str) -> Optional[Dict]:
         """根据题目号获取 LeetCode 题目详情"""
@@ -421,24 +483,37 @@ class LeetCodePlugin(Star):
             # 获取标题（优先使用中文标题）
             title = data.get("title", "")
             title_cn = data.get("title_cn", "")
+            slug = data.get("slug", "")
             if not title_cn:
                 title_cn = title
+
+            # 获取英文内容
+            content_en = data.get("content", "")
+
+            # 尝试获取中文内容
+            content_cn = ""
+            if slug:
+                try:
+                    content_cn = await self._fetch_chinese_content(slug)
+                except Exception as e:
+                    logger.warning(f"获取中文内容失败: {e}")
 
             # 构建结果
             result = {
                 "date": "",
                 "title": title,
                 "titleCn": title_cn,
-                "titleSlug": data.get("slug", ""),
+                "titleSlug": slug,
                 "frontendQuestionId": str(data.get("id", question_id)),
                 "difficulty": data.get("difficulty", ""),
                 "acRate": 0,
-                "link": f"https://leetcode.com/problems/{data.get('slug', '')}/",
+                "link": f"https://leetcode.com/problems/{slug}/",
                 "topicTags": [],
-                "content": data.get("content", "")
+                "content": content_en,
+                "contentCn": content_cn
             }
 
-            logger.info(f"成功获取题目 {question_id}: {result['title']}")
+            logger.info(f"成功获取题目 {question_id}: {title_cn or title}")
             return result
         except Exception as e:
             logger.error(f"获取题目 {question_id} 失败: {e}", exc_info=True)
@@ -506,29 +581,62 @@ class LeetCodePlugin(Star):
 
         # 添加完整题目内容
         content = question.get("content", "")
-        content_cn = question.get("contentCn", "")  # 中文内容（如果API支持）
+        content_cn = question.get("contentCn", "")  # 中文内容
         
-        if content:
-            clean_content = clean_html(content)
-            result_text += f"\n📝 题目描述:\n"
+        if content or content_cn:
+            clean_content_en = clean_html(content) if content else ""
+            clean_content_cn = clean_html(content_cn) if content_cn else ""
             
             # 根据语言设置显示内容
-            if language == "zh" and content_cn:
-                # 优先显示中文内容
-                display_content = clean_html(content_cn)
-            elif language == "en":
-                # 仅显示英文
-                display_content = clean_content
+            if language == "zh" and clean_content_cn:
+                # 仅中文
+                result_text += f"\n📝 题目描述:\n"
+                display_content = clean_content_cn
+                # 分段发送，避免消息过长
+                max_length = 3000
+                if len(display_content) > max_length:
+                    result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                else:
+                    result_text += display_content
+                    
+            elif language == "en" and clean_content_en:
+                # 仅英文
+                result_text += f"\n📝 题目描述:\n"
+                display_content = clean_content_en
+                max_length = 3000
+                if len(display_content) > max_length:
+                    result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                else:
+                    result_text += display_content
+                    
+            elif language == "both":
+                # 双语模式 - 同时显示中英文
+                # 中文部分
+                if clean_content_cn:
+                    result_text += f"\n📝 题目描述 (中文):\n"
+                    max_length = 1500
+                    if len(clean_content_cn) > max_length:
+                        result_text += clean_content_cn[:max_length] + "\n\n... (内容已截断)"
+                    else:
+                        result_text += clean_content_cn
+                
+                # 英文部分
+                if clean_content_en:
+                    result_text += f"\n\n📝 Description (English):\n"
+                    max_length = 1500
+                    if len(clean_content_en) > max_length:
+                        result_text += clean_content_en[:max_length] + "\n\n... (content truncated)"
+                    else:
+                        result_text += clean_content_en
             else:
-                # 双语或默认显示英文内容
-                display_content = clean_content
-            
-            # 分段发送，避免消息过长，上限3000字符
-            max_length = 3000
-            if len(display_content) > max_length:
-                result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
-            else:
-                result_text += display_content
+                # 默认显示可用内容
+                result_text += f"\n📝 题目描述:\n"
+                display_content = clean_content_cn or clean_content_en
+                max_length = 3000
+                if len(display_content) > max_length:
+                    result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
+                else:
+                    result_text += display_content
 
         return result_text
 
