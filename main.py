@@ -9,13 +9,11 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.core.message.message_event_result import MessageChain
-import astrbot.core.message.components as Comp
 
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
 
@@ -36,7 +34,7 @@ def clean_html(html_content: str) -> str:
 
 
 # ============ 配置常量 ============
-ADMIN_USERS: List[str] = []
+ADMIN_USERS: list = []
 
 
 @register(__plugin_name__, __author__, __plugin_desc__, __version__)
@@ -61,7 +59,7 @@ class LeetCodePlugin(Star):
 
         # 个人订阅相关数据结构
         self.user_origins: Dict[str, str] = {}  # 保存用户的 unified_msg_origin
-        self.subscribed_users: List[str] = []   # 订阅用户ID列表
+        self.subscribed_users: list = []   # 订阅用户ID列表
         self.user_language_prefs: Dict[str, str] = {}  # 用户语言偏好设置
 
         # 加载配置
@@ -447,14 +445,14 @@ class LeetCodePlugin(Star):
 
         return None
 
-    def _build_question_message(self, question: Dict, language: str = "zh") -> List:
+    def _build_question_message(self, question: Dict, language: str = "zh") -> str:
         """构建题目消息，支持多语言显示
         
         Args:
             question: 题目数据字典
             language: 语言选项 - "zh"(中文), "en"(英文), "both"(双语)
         """
-        chain = []
+        result_text = f"📅 {question.get('date', '')}\n"
 
         difficulty_emoji = {
             "Easy": "🟢",
@@ -487,26 +485,24 @@ class LeetCodePlugin(Star):
                 tags.append(str(tag))
 
         # 根据语言设置构建标题
-        chain.append(Comp.Plain(f"📅 {question.get('date', '')}\n"))
-        
         if language == "zh":
             # 仅中文
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+            result_text += f"{emoji} 【{qid}. {title_cn}】\n"
         elif language == "en":
             # 仅英文
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title}】\n"))
+            result_text += f"{emoji} 【{qid}. {title}】\n"
         else:
             # 双语模式
-            chain.append(Comp.Plain(f"{emoji} 【{qid}. {title_cn}】\n"))
+            result_text += f"{emoji} 【{qid}. {title_cn}】\n"
             if title_cn != title:
-                chain.append(Comp.Plain(f"English: {title}\n"))
+                result_text += f"English: {title}\n"
 
-        chain.append(Comp.Plain(f"难度: {difficulty_cn_text}\n"))
+        result_text += f"难度: {difficulty_cn_text}\n"
         if ac_rate:
-            chain.append(Comp.Plain(f"通过率: {ac_rate * 100:.1f}%\n"))
+            result_text += f"通过率: {ac_rate * 100:.1f}%\n"
         if tags:
-            chain.append(Comp.Plain(f"标签: {', '.join(tags)}\n"))
-        chain.append(Comp.Plain(f"🔗 链接: {link}\n"))
+            result_text += f"标签: {', '.join(tags)}\n"
+        result_text += f"🔗 链接: {link}\n"
 
         # 添加完整题目内容
         content = question.get("content", "")
@@ -514,7 +510,7 @@ class LeetCodePlugin(Star):
         
         if content:
             clean_content = clean_html(content)
-            chain.append(Comp.Plain(f"\n📝 题目描述:\n"))
+            result_text += f"\n📝 题目描述:\n"
             
             # 根据语言设置显示内容
             if language == "zh" and content_cn:
@@ -530,21 +526,21 @@ class LeetCodePlugin(Star):
             # 分段发送，避免消息过长，上限3000字符
             max_length = 3000
             if len(display_content) > max_length:
-                chain.append(Comp.Plain(display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"))
+                result_text += display_content[:max_length] + "\n\n... (内容已截断，请访问链接查看完整题目)"
             else:
-                chain.append(Comp.Plain(display_content))
+                result_text += display_content
 
-        return chain
+        return result_text
 
     async def _send_question_to_subscribers(self, question: Dict):
         """发送题目到所有群组订阅者"""
-        chain = self._build_question_message(question, self.default_language)
+        text = self._build_question_message(question, self.default_language)
 
         for group_id in self.subscribed_groups:
             try:
                 await self.context.send_message(
                     self._get_session_for_group(group_id),
-                    MessageChain(chain)
+                    text
                 )
                 logger.info(f"LeetCode 每日一题已发送到群 {group_id}")
                 await asyncio.sleep(1)
@@ -557,11 +553,11 @@ class LeetCodePlugin(Star):
             try:
                 # 获取用户的语言偏好
                 user_lang = self._get_user_language(user_id)
-                chain = self._build_question_message(question, user_lang)
+                text = self._build_question_message(question, user_lang)
                 
                 await self.context.send_message(
                     self._get_session_for_user(user_id),
-                    MessageChain(chain)
+                    text
                 )
                 logger.info(f"LeetCode 每日一题已发送到用户 {user_id}")
                 await asyncio.sleep(1)
@@ -571,8 +567,7 @@ class LeetCodePlugin(Star):
     async def _send_plain_text(self, group_id: str, text: str):
         """发送纯文本消息"""
         try:
-            chain = [Comp.Plain(text)]
-            await self.context.send_message(self._get_session_for_group(group_id), MessageChain(chain))
+            await self.context.send_message(self._get_session_for_group(group_id), text)
         except Exception as e:
             logger.error(f"发送消息到群 {group_id} 失败: {e}")
 
@@ -798,8 +793,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         else:
             language = self._get_user_language(user_id)
 
-        chain = self._build_question_message(question, language)
-        yield event.chain_result(chain)
+        text = self._build_question_message(question, language)
+        yield event.plain_result(text)
 
     @filter.command("lc列表")
     async def cmd_list(self, event: AstrMessageEvent):
@@ -1034,8 +1029,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result("❌ 获取今日题目失败，请稍后再试")
                 return
 
-            chain = self._build_question_message(question, language)
-            yield event.chain_result(chain)
+            text = self._build_question_message(question, language)
+            yield event.plain_result(text)
         else:
             # 提供了题目号，查询指定题目
             yield event.plain_result(f"⏳ 正在查询题目 {question_id}...")
@@ -1046,8 +1041,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
                 return
 
-            chain = self._build_question_message(question, language)
-            yield event.chain_result(chain)
+            text = self._build_question_message(question, language)
+            yield event.plain_result(text)
 
     @filter.command("lc解题")
     async def cmd_solve(self, event: AstrMessageEvent, question_id: str = ""):
