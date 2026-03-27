@@ -325,14 +325,18 @@ class LeetCodePlugin(Star):
         except asyncio.CancelledError:
             logger.info("LeetCode 每日一题监控任务已停止")
 
-    async def _fetch_daily_question(self) -> Optional[Dict]:
-        """获取 LeetCode 每日一题 - 使用内置的 urllib"""
+    async def _fetch_daily_question(self, umo: str = None) -> Optional[Dict]:
+        """获取 LeetCode 每日一题 - 使用内置的 urllib
+        
+        Args:
+            umo: 统一消息来源标识，用于获取当前会话的LLM提供商（翻译用）
+        """
         try:
             import urllib.request
             import ssl
 
             url = "https://leetcode-api-pied.vercel.app/daily"
-            logger.info(f"[每日一题] 开始获取，URL: {url}")
+            logger.info(f"[每日一题] 开始获取，URL: {url}, umo: {umo}")
 
             # 创建SSL上下文，忽略证书验证
             ssl_context = ssl.create_default_context()
@@ -374,10 +378,10 @@ class LeetCodePlugin(Star):
             content_cn_failed = False
             
             if self.enable_llm_translation and title_slug:
-                logger.info(f"[每日一题] 准备使用大模型翻译，title_slug: {title_slug}")
+                logger.info(f"[每日一题] 准备使用大模型翻译，title_slug: {title_slug}, umo: {umo}")
                 try:
                     title_cn, content_cn, translation_success = await self._fetch_chinese_content(
-                        title_slug, title, content_html
+                        title_slug, title, content_html, umo=umo
                     )
                     if not translation_success:
                         content_cn_failed = True
@@ -415,13 +419,14 @@ class LeetCodePlugin(Star):
 
         return None
 
-    async def _translate_with_llm(self, title: str, content: str, is_title: bool = False) -> str:
+    async def _translate_with_llm(self, title: str, content: str, is_title: bool = False, umo: str = None) -> str:
         """使用大模型API翻译题目内容
         
         Args:
             title: 英文标题
             content: 英文内容（HTML格式）
             is_title: 是否只翻译标题
+            umo: 统一消息来源标识，用于获取当前会话的LLM提供商
             
         Returns:
             中文翻译结果
@@ -458,10 +463,19 @@ class LeetCodePlugin(Star):
 
 中文翻译:"""
 
-            # 调用LLM
-            provider_id = self.translation_provider_id if self.translation_provider_id else None
-            
-            logger.info(f"[LLM翻译] 调用大模型API，provider_id: {provider_id or 'default'}")
+            # 调用LLM - 使用和AI解题相同的方式获取provider
+            if umo:
+                # 通过会话获取当前provider（推荐方式）
+                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                logger.info(f"[LLM翻译] 使用当前会话的LLM提供商: {provider_id}")
+            elif self.translation_provider_id:
+                # 使用配置的专用翻译提供商
+                provider_id = self.translation_provider_id
+                logger.info(f"[LLM翻译] 使用配置的翻译提供商: {provider_id}")
+            else:
+                # 使用默认提供商
+                provider_id = None
+                logger.info("[LLM翻译] 使用默认LLM提供商")
             
             llm_resp = await self.context.llm_generate(
                 chat_provider_id=provider_id,
@@ -477,22 +491,23 @@ class LeetCodePlugin(Star):
             logger.error(f"[LLM翻译] 翻译失败: {e}")
             return ""
 
-    async def _translate_title_with_llm(self, title: str) -> str:
+    async def _translate_title_with_llm(self, title: str, umo: str = None) -> str:
         """使用大模型翻译标题"""
-        return await self._translate_with_llm(title, "", is_title=True)
+        return await self._translate_with_llm(title, "", is_title=True, umo=umo)
 
-    async def _fetch_chinese_content(self, title_slug: str, title: str = "", content: str = "") -> tuple:
+    async def _fetch_chinese_content(self, title_slug: str, title: str = "", content: str = "", umo: str = None) -> tuple:
         """获取中文题目内容 - 使用大模型API翻译
         
         Args:
             title_slug: 题目slug
             title: 英文标题（用于翻译）
             content: 英文内容（用于翻译）
+            umo: 统一消息来源标识，用于获取当前会话的LLM提供商
             
         Returns:
             tuple: (中文标题, 中文内容, 是否翻译成功)
         """
-        logger.info(f"[中文内容] 使用大模型翻译，title_slug: {title_slug}")
+        logger.info(f"[中文内容] 使用大模型翻译，title_slug: {title_slug}, umo: {umo}")
         
         translated_title = ""
         translated_content = ""
@@ -501,13 +516,13 @@ class LeetCodePlugin(Star):
         try:
             # 翻译标题
             if title:
-                translated_title = await self._translate_title_with_llm(title)
+                translated_title = await self._translate_title_with_llm(title, umo=umo)
                 if translated_title:
                     logger.info(f"[中文内容] 标题翻译成功: {translated_title[:50]}...")
             
             # 翻译内容
             if content:
-                translated_content = await self._translate_with_llm(title, content, is_title=False)
+                translated_content = await self._translate_with_llm(title, content, is_title=False, umo=umo)
                 if translated_content:
                     logger.info(f"[中文内容] 内容翻译成功，长度: {len(translated_content)}")
                     translation_success = True
@@ -519,8 +534,13 @@ class LeetCodePlugin(Star):
             return "", "", False
             return ""
 
-    async def _fetch_question_by_id(self, question_id: str) -> Optional[Dict]:
-        """根据题目号获取 LeetCode 题目详情"""
+    async def _fetch_question_by_id(self, question_id: str, umo: str = None) -> Optional[Dict]:
+        """根据题目号获取 LeetCode 题目详情
+        
+        Args:
+            question_id: 题目编号
+            umo: 统一消息来源标识，用于获取当前会话的LLM提供商（翻译用）
+        """
         try:
             import urllib.request
             import ssl
@@ -565,10 +585,10 @@ class LeetCodePlugin(Star):
             content_cn_failed = False
             
             if self.enable_llm_translation and slug:
-                logger.info(f"[题目查询] 准备使用大模型翻译")
+                logger.info(f"[题目查询] 准备使用大模型翻译，umo: {umo}")
                 try:
                     title_cn, content_cn, translation_success = await self._fetch_chinese_content(
-                        slug, title, content_en
+                        slug, title, content_en, umo=umo
                     )
                     if not translation_success:
                         content_cn_failed = True
@@ -1004,7 +1024,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             question = self.today_question
         else:
             yield event.plain_result("⏳ 正在获取今日题目...")
-            question = await self._fetch_daily_question()
+            # 传递 umo 以使用当前会话的 LLM 提供商进行翻译
+            umo = event.unified_msg_origin if hasattr(event, 'unified_msg_origin') else None
+            question = await self._fetch_daily_question(umo=umo)
             if question:
                 self.today_question = question
                 self.today_date = today_date
@@ -1237,6 +1259,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         # 获取语言设置
         language = self.default_language if group_id else self._get_user_language(user_id)
 
+        # 获取 umo 用于 LLM 翻译
+        umo = event.unified_msg_origin if hasattr(event, 'unified_msg_origin') else None
+        
         if not question_id:
             # 没有提供题目号，获取今日题目
             today_date = datetime.now().strftime("%Y-%m-%d")
@@ -1246,7 +1271,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 question = self.today_question
             else:
                 yield event.plain_result("⏳ 正在获取今日题目...")
-                question = await self._fetch_daily_question()
+                question = await self._fetch_daily_question(umo=umo)
                 if question:
                     self.today_question = question
                     self.today_date = today_date
@@ -1261,7 +1286,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             # 提供了题目号，查询指定题目
             yield event.plain_result(f"⏳ 正在查询题目 {question_id}...")
 
-            question = await self._fetch_question_by_id(question_id)
+            question = await self._fetch_question_by_id(question_id, umo=umo)
 
             if not question:
                 yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
@@ -1290,6 +1315,9 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         # 获取语言设置
         language = self.default_language if group_id else self._get_user_language(user_id)
 
+        # 获取 umo 用于 LLM 翻译
+        umo = event.unified_msg_origin if hasattr(event, 'unified_msg_origin') else None
+
         if not question_id:
             # 没有提供题目号，获取今日题目
             today_date = datetime.now().strftime("%Y-%m-%d")
@@ -1299,7 +1327,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 question = self.today_question
             else:
                 yield event.plain_result("⏳ 正在获取今日题目...")
-                question = await self._fetch_daily_question()
+                question = await self._fetch_daily_question(umo=umo)
                 if question:
                     self.today_question = question
                     self.today_date = today_date
@@ -1311,7 +1339,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             # 提供了题目号，查询指定题目
             yield event.plain_result(f"⏳ 正在查询题目 {question_id}...")
 
-            question = await self._fetch_question_by_id(question_id)
+            question = await self._fetch_question_by_id(question_id, umo=umo)
 
             if not question:
                 yield event.plain_result(f"❌ 未找到题目 {question_id}，请检查题号是否正确")
