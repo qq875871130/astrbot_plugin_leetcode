@@ -123,28 +123,28 @@ class LeetCodePlugin(Star):
                 )
 
                 # 加载管理员列表
-                admin_from_config = astrbot_config.get("leetcode_admin_users", [])
+                admin_from_config = astrbot_config.get("admin_users", [])
                 if admin_from_config:
                     default_config["admin_users"] = [str(u) for u in admin_from_config]
 
                 # 加载多语言和个人订阅配置
                 default_config["default_language"] = astrbot_config.get(
-                    "leetcode_default_language", default_config.get("default_language", "zh")
+                    "default_language", default_config.get("default_language", "zh")
                 )
                 default_config["enable_personal_subscribe"] = astrbot_config.get(
-                    "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
+                    "enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
                 )
                 default_config["personal_inform_hour"] = astrbot_config.get(
-                    "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
+                    "personal_inform_hour", default_config.get("personal_inform_hour", 9)
                 )
                 default_config["personal_inform_minute"] = astrbot_config.get(
-                    "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
+                    "personal_inform_minute", default_config.get("personal_inform_minute", 30)
                 )
                 default_config["enable_llm_translation"] = astrbot_config.get(
-                    "leetcode_enable_llm_translation", default_config.get("enable_llm_translation", True)
+                    "enable_llm_translation", default_config.get("enable_llm_translation", True)
                 )
                 default_config["translation_provider_id"] = astrbot_config.get(
-                    "leetcode_translation_provider_id", default_config.get("translation_provider_id", "")
+                    "translation_provider_id", default_config.get("translation_provider_id", "")
                 )
         except Exception as e:
             logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
@@ -178,6 +178,10 @@ class LeetCodePlugin(Star):
         # 大模型翻译配置
         self.enable_llm_translation = default_config.get("enable_llm_translation", True)
         self.translation_provider_id = default_config.get("translation_provider_id", "")
+        
+        # 调试日志：打印翻译配置
+        logger.info(f"[配置加载] enable_llm_translation: {self.enable_llm_translation}")
+        logger.info(f"[配置加载] translation_provider_id: '{self.translation_provider_id}'")
 
         # 加载个人订阅配置
         self._load_personal_subscription()
@@ -470,6 +474,7 @@ class LeetCodePlugin(Star):
 中文翻译:"""
 
             # 调用LLM - 优先级: 1)配置的翻译提供商 2)当前会话提供商 3)默认提供商
+            logger.info(f"[LLM翻译] 优先级判断 - self.translation_provider_id: '{self.translation_provider_id}', umo: '{umo}'")
             if self.translation_provider_id:
                 # 优先使用配置的专用翻译提供商
                 provider_id = self.translation_provider_id
