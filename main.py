@@ -411,7 +411,53 @@ class LeetCodePlugin(Star):
         return None
 
     async def _fetch_chinese_content(self, title_slug: str) -> str:
-        """从 LeetCode 中国站获取中文题目内容 - 使用 aiohttp 绕过 Cloudflare"""
+        """从 LeetCode 中国站获取中文题目内容 - 使用 curl_cffi 绕过 Cloudflare"""
+        try:
+            from curl_cffi.requests import AsyncSession
+
+            url = "https://leetcode.cn/graphql"
+            logger.info(f"[中文内容] 使用 curl_cffi 获取，title_slug: {title_slug}")
+
+            query = {
+                "operationName": "questionData",
+                "variables": {"titleSlug": title_slug},
+                "query": "query questionData($titleSlug: String!) { question(titleSlug: $titleSlug) { translatedContent } }"
+            }
+
+            async with AsyncSession() as session:
+                response = await session.post(
+                    url,
+                    json=query,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Origin': 'https://leetcode.cn',
+                        'Referer': f'https://leetcode.cn/problems/{title_slug}/',
+                    },
+                    impersonate="chrome120",
+                    timeout=10
+                )
+
+                logger.info(f"[中文内容] 响应状态: {response.status_code}")
+
+                if response.status_code == 200:
+                    response_data = response.json()
+                    question_data = response_data.get("data", {}).get("question", {})
+                    translated_content = question_data.get("translatedContent", "")
+                    logger.info(f"[中文内容] 成功获取，长度: {len(translated_content) if translated_content else 0}")
+                    return translated_content
+                else:
+                    logger.warning(f"[中文内容] HTTP {response.status_code}: {response.text[:200]}")
+                    return ""
+
+        except ImportError:
+            logger.warning("[中文内容] curl_cffi 未安装，尝试使用 aiohttp")
+            return await self._fetch_chinese_content_aiohttp(title_slug)
+        except Exception as e:
+            logger.warning(f"[中文内容] curl_cffi 获取失败: {e}")
+            return await self._fetch_chinese_content_aiohttp(title_slug)
+
+    async def _fetch_chinese_content_aiohttp(self, title_slug: str) -> str:
+        """使用 aiohttp 作为降级方案"""
         try:
             import aiohttp
 
@@ -438,7 +484,6 @@ class LeetCodePlugin(Star):
                 async with session.post(url, json=query, headers=headers) as response:
                     logger.info(f"[中文内容] 响应状态: {response.status}")
                     response_text = await response.text()
-                    logger.info(f"[中文内容] 响应内容: {response_text[:300]}...")
 
                     if response.status == 200:
                         response_data = json.loads(response_text)
@@ -451,49 +496,7 @@ class LeetCodePlugin(Star):
                         return ""
 
         except Exception as e:
-            logger.warning(f"[中文内容] aiohttp 获取失败: {e}")
-            # 降级到 urllib 尝试
-            return await self._fetch_chinese_content_urllib(title_slug)
-
-    async def _fetch_chinese_content_urllib(self, title_slug: str) -> str:
-        """使用 urllib 作为降级方案"""
-        try:
-            import urllib.request
-            import ssl
-
-            url = "https://leetcode.cn/graphql"
-            query = {
-                "operationName": "questionData",
-                "variables": {"titleSlug": title_slug},
-                "query": "query questionData($titleSlug: String!) { question(titleSlug: $titleSlug) { translatedContent } }"
-            }
-
-            data = json.dumps(query, separators=(',', ':')).encode('utf-8')
-
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            loop = asyncio.get_event_loop()
-
-            def fetch():
-                req = urllib.request.Request(
-                    url,
-                    data=data,
-                    headers={
-                        'Content-Type': 'application/json',
-                        'User-Agent': 'Mozilla/5.0',
-                    },
-                    method='POST'
-                )
-                with urllib.request.urlopen(req, context=ssl_context, timeout=5) as response:
-                    return response.read().decode('utf-8')
-
-            response_text = await loop.run_in_executor(None, fetch)
-            response_data = json.loads(response_text)
-            return response_data.get("data", {}).get("question", {}).get("translatedContent", "")
-        except Exception as e:
-            logger.warning(f"[中文内容] urllib 降级也失败: {e}")
+            logger.warning(f"[中文内容] aiohttp 也失败: {e}")
             return ""
 
     async def _fetch_question_by_id(self, question_id: str) -> Optional[Dict]:
