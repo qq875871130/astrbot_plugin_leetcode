@@ -14,7 +14,6 @@ from typing import Dict, List, Optional
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.message_event_result import MessageChain
 import astrbot.core.message.components as Comp
 
@@ -44,9 +43,8 @@ ADMIN_USERS: List[str] = []
 class LeetCodePlugin(Star):
     """LeetCode 每日一题提醒插件主类"""
 
-    def __init__(self, context: Context, config: AstrBotConfig = None):
+    def __init__(self, context: Context):
         super().__init__(context)
-        self.config = config
         self.context = context
 
         # 数据目录
@@ -112,35 +110,40 @@ class LeetCodePlugin(Star):
                 logger.error(f"加载配置文件失败: {e}")
 
         # 从 AstrBot 配置加载（优先级更高）
-        if self.config:
-            default_config["check_interval_seconds"] = self.config.get(
-                "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
-            )
-            default_config["inform_hour"] = self.config.get(
-                "leetcode_inform_hour", default_config["inform_hour"]
-            )
-            default_config["inform_minute"] = self.config.get(
-                "leetcode_inform_minute", default_config["inform_minute"]
-            )
+        try:
+            # 在 AstrBot v4 中，通过 context 获取配置
+            astrbot_config = getattr(self.context, 'config', None)
+            if astrbot_config:
+                default_config["check_interval_seconds"] = astrbot_config.get(
+                    "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
+                )
+                default_config["inform_hour"] = astrbot_config.get(
+                    "leetcode_inform_hour", default_config["inform_hour"]
+                )
+                default_config["inform_minute"] = astrbot_config.get(
+                    "leetcode_inform_minute", default_config["inform_minute"]
+                )
 
-            # 加载管理员列表
-            admin_from_config = self.config.get("leetcode_admin_users", [])
-            if admin_from_config:
-                default_config["admin_users"] = [str(u) for u in admin_from_config]
+                # 加载管理员列表
+                admin_from_config = astrbot_config.get("leetcode_admin_users", [])
+                if admin_from_config:
+                    default_config["admin_users"] = [str(u) for u in admin_from_config]
 
-            # 加载多语言和个人订阅配置
-            default_config["default_language"] = self.config.get(
-                "leetcode_default_language", default_config.get("default_language", "zh")
-            )
-            default_config["enable_personal_subscribe"] = self.config.get(
-                "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
-            )
-            default_config["personal_inform_hour"] = self.config.get(
-                "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
-            )
-            default_config["personal_inform_minute"] = self.config.get(
-                "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
-            )
+                # 加载多语言和个人订阅配置
+                default_config["default_language"] = astrbot_config.get(
+                    "leetcode_default_language", default_config.get("default_language", "zh")
+                )
+                default_config["enable_personal_subscribe"] = astrbot_config.get(
+                    "leetcode_enable_personal_subscribe", default_config.get("enable_personal_subscribe", True)
+                )
+                default_config["personal_inform_hour"] = astrbot_config.get(
+                    "leetcode_personal_inform_hour", default_config.get("personal_inform_hour", 9)
+                )
+                default_config["personal_inform_minute"] = astrbot_config.get(
+                    "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
+                )
+        except Exception as e:
+            logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
 
         # 加载订阅配置（动态修改的）
         if os.path.exists(self.subscription_file):
