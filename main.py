@@ -140,6 +140,12 @@ class LeetCodePlugin(Star):
                 default_config["personal_inform_minute"] = astrbot_config.get(
                     "leetcode_personal_inform_minute", default_config.get("personal_inform_minute", 30)
                 )
+                default_config["enable_llm_translation"] = astrbot_config.get(
+                    "leetcode_enable_llm_translation", default_config.get("enable_llm_translation", True)
+                )
+                default_config["translation_provider_id"] = astrbot_config.get(
+                    "leetcode_translation_provider_id", default_config.get("translation_provider_id", "")
+                )
         except Exception as e:
             logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
 
@@ -584,20 +590,22 @@ class LeetCodePlugin(Star):
             content_cn = ""
             content_cn_failed = False
             
-            if self.enable_llm_translation and slug:
-                logger.info(f"[题目查询] 准备使用大模型翻译，umo: {umo}")
+            # 只要有标题就翻译标题（lcid.cc /info 端点不返回内容，只翻译标题即可）
+            if self.enable_llm_translation and title:
+                logger.info(f"[题目查询] 准备使用大模型翻译标题，umo: {umo}")
                 try:
-                    title_cn, content_cn, translation_success = await self._fetch_chinese_content(
-                        slug, title, content_en, umo=umo
-                    )
-                    if not translation_success:
+                    # 只翻译标题，内容留空
+                    title_cn = await self._translate_title_with_llm(title, umo=umo)
+                    if title_cn:
+                        logger.info(f"[题目查询] 标题翻译成功: {title_cn}")
+                    else:
                         content_cn_failed = True
-                        logger.warning(f"[题目查询] 大模型翻译未完全成功")
+                        logger.warning(f"[题目查询] 标题翻译失败")
                 except Exception as e:
-                    logger.warning(f"[题目查询] 大模型翻译失败: {e}")
+                    logger.warning(f"[题目查询] 标题翻译失败: {e}")
                     content_cn_failed = True
             else:
-                logger.info(f"[题目查询] 大模型翻译已禁用或无slug")
+                logger.info(f"[题目查询] 大模型翻译已禁用或无标题")
                 content_cn_failed = True
             
             # 如果没有翻译成功，使用英文作为后备
