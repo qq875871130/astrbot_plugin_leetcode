@@ -463,15 +463,15 @@ class LeetCodePlugin(Star):
 
 中文翻译:"""
 
-            # 调用LLM - 使用和AI解题相同的方式获取provider
-            if umo:
-                # 通过会话获取当前provider（推荐方式）
-                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-                logger.info(f"[LLM翻译] 使用当前会话的LLM提供商: {provider_id}")
-            elif self.translation_provider_id:
-                # 使用配置的专用翻译提供商
+            # 调用LLM - 优先级: 1)配置的翻译提供商 2)当前会话提供商 3)默认提供商
+            if self.translation_provider_id:
+                # 优先使用配置的专用翻译提供商
                 provider_id = self.translation_provider_id
                 logger.info(f"[LLM翻译] 使用配置的翻译提供商: {provider_id}")
+            elif umo:
+                # 通过会话获取当前provider
+                provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+                logger.info(f"[LLM翻译] 使用当前会话的LLM提供商: {provider_id}")
             else:
                 # 使用默认提供商
                 provider_id = None
