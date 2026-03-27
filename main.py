@@ -414,6 +414,7 @@ class LeetCodePlugin(Star):
         """从 LeetCode 中国站获取中文题目内容"""
         try:
             import urllib.request
+            import urllib.error
             import ssl
 
             # LeetCode 中国站 GraphQL API
@@ -431,8 +432,11 @@ class LeetCodePlugin(Star):
                 }"""
             }
 
-            data = json.dumps(query).encode('utf-8')
-            logger.info(f"[中文内容] 请求体: {json.dumps(query)}")
+            # 使用紧凑的 JSON 格式，避免换行符问题
+            query_str = json.dumps(query, separators=(',', ':'))
+            data = query_str.encode('utf-8')
+            logger.info(f"[中文内容] 请求体: {query_str}")
+            logger.info(f"[中文内容] 请求体 bytes: {data}")
 
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
@@ -446,11 +450,24 @@ class LeetCodePlugin(Star):
                     data=data,
                     headers={
                         'Content-Type': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Connection': 'close',
                     },
                     method='POST'
                 )
-                with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
-                    return response.read().decode('utf-8')
+                logger.info(f"[中文内容] 请求头: {dict(req.headers)}")
+                try:
+                    with urllib.request.urlopen(req, context=ssl_context, timeout=5) as response:
+                        logger.info(f"[中文内容] 响应状态: {response.status}")
+                        return response.read().decode('utf-8')
+                except urllib.error.HTTPError as e:
+                    logger.error(f"[中文内容] HTTP Error: {e.code} - {e.reason}")
+                    try:
+                        error_body = e.read().decode('utf-8')
+                        logger.error(f"[中文内容] 错误响应体: {error_body[:500]}")
+                    except:
+                        pass
+                    raise
 
             response_text = await loop.run_in_executor(None, fetch)
             logger.info(f"[中文内容] API 原始响应: {response_text[:500]}...")
