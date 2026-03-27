@@ -14,7 +14,7 @@
   },
   "enable_personal_subscribe": {
     "description": "启用个人订阅功能",
-    "type": "boolean",
+    "type": "bool",
     "hint": "是否允许用户进行个人订阅（私信接收题目）",
     "default": true
   },
