@@ -627,6 +627,10 @@ class LeetCodePlugin(Star):
         difficulty_cn_text = difficulty_cn.get(difficulty, difficulty)
         ac_rate = question.get("acRate", 0)
         link = question.get("link", "")
+
+        # 根据语言选择决定链接域名：zh使用leetcode.cn，en和both使用leetcode.com
+        if language == "zh" and link and "leetcode.com" in link:
+            link = link.replace("leetcode.com", "leetcode.cn")
         
         tags = []
         for tag in question.get("topicTags", []):
