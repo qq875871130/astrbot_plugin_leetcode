@@ -14,8 +14,27 @@ from typing import Dict, Optional
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api import AstrBotConfig
 
 from ._version import __version__, __plugin_name__, __author__, __plugin_desc__
+
+
+# 配置项默认值
+DEFAULTS = {
+    "admin_users": [],
+    "default_language": "zh",
+    "enable_personal_subscribe": True,
+    "personal_inform_hour": 9,
+    "personal_inform_minute": 30,
+    "enable_llm_translation": True,
+    "translation_provider_id": "",
+}
+
+
+def _get(config: dict, key: str):
+    """从配置中读取值，缺失或为 None 时回退到默认值。"""
+    val = config.get(key)
+    return val if val is not None else DEFAULTS[key]
 
 
 def clean_html(html_content: str) -> str:
@@ -41,16 +60,16 @@ ADMIN_USERS: list = []
 class LeetCodePlugin(Star):
     """LeetCode 每日一题提醒插件主类"""
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
+        self.config = config
 
         # 数据目录
         self.data_dir = str(StarTools.get_data_dir("astrbot_plugin_leetcode"))
         os.makedirs(self.data_dir, exist_ok=True)
 
-        # 配置文件路径
-        self.config_file = os.path.join(self.data_dir, "config.json")
+        # 配置文件路径（仅用于订阅数据等动态配置）
         self.subscription_file = os.path.join(self.data_dir, "subscription.json")
         self.personal_subscription_file = os.path.join(self.data_dir, "personal_subscription.json")
 
@@ -62,8 +81,17 @@ class LeetCodePlugin(Star):
         self.subscribed_users: list = []   # 订阅用户ID列表
         self.user_language_prefs: Dict[str, str] = {}  # 用户语言偏好设置
 
-        # 加载配置
-        self._load_config()
+        # 从 AstrBotConfig 读取配置
+        self.admin_users: list = [str(u) for u in _get(config, "admin_users")]
+        self.default_language: str = _get(config, "default_language")
+        self.enable_personal_subscribe: bool = bool(_get(config, "enable_personal_subscribe"))
+        self.personal_inform_hour: int = int(_get(config, "personal_inform_hour"))
+        self.personal_inform_minute: int = int(_get(config, "personal_inform_minute"))
+        self.enable_llm_translation: bool = bool(_get(config, "enable_llm_translation"))
+        self.translation_provider_id: str = _get(config, "translation_provider_id")
+
+        # 加载动态订阅配置
+        self._load_subscription_config()
 
         # 今日题目缓存
         self.today_question: Optional[Dict] = None
@@ -84,91 +112,22 @@ class LeetCodePlugin(Star):
 
         logger.info(f"LeetCode 每日一题提醒插件已加载")
 
-    def _load_config(self):
-        """加载配置文件"""
-        # 默认配置（包含所有配置项的默认值）
-        default_config = {
-            "check_interval_seconds": 3600,
-            "inform_hour": 9,
-            "inform_minute": 0,
-            "admin_users": [],
-            "group_origins": {},
-            "subscribed_groups": [],
-            # 多语言和个人订阅配置默认值
-            "default_language": "zh",
-            "enable_personal_subscribe": True,
-            "personal_inform_hour": 9,
-            "personal_inform_minute": 30,
-            "enable_llm_translation": True,
-            "translation_provider_id": ""
-        }
+    def _load_subscription_config(self):
+        """加载动态订阅配置（群组订阅、个人订阅等运行时数据）"""
+        # 初始化默认值
+        self.subscribed_groups: list = []
+        self.inform_hour: int = 9
+        self.inform_minute: int = 0
+        self.check_interval_seconds: int = 3600
+        self.group_origins: Dict[str, str] = {}
 
-        # 从文件加载配置
-        if os.path.exists(self.config_file):
-            try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    loaded_config = json.load(f)
-                    default_config.update(loaded_config)
-            except json.JSONDecodeError as e:
-                logger.error(f"配置文件JSON格式错误: {e}")
-            except Exception as e:
-                logger.error(f"加载配置文件失败: {e}")
-
-        # 从 AstrBot 配置加载（优先级更高）
-        try:
-            # 在 AstrBot v4 中，通过 context 获取配置
-            astrbot_config = getattr(self.context, 'config', None)
-            logger.info(f"[配置加载] astrbot_config 存在: {astrbot_config is not None}")
-            if astrbot_config:
-                default_config["check_interval_seconds"] = astrbot_config.get(
-                    "leetcode_check_interval_seconds", default_config["check_interval_seconds"]
-                )
-                default_config["inform_hour"] = astrbot_config.get(
-                    "leetcode_inform_hour", default_config["inform_hour"]
-                )
-                default_config["inform_minute"] = astrbot_config.get(
-                    "leetcode_inform_minute", default_config["inform_minute"]
-                )
-
-                # 加载管理员列表
-                admin_from_config = astrbot_config.get("admin_users", [])
-                if admin_from_config:
-                    default_config["admin_users"] = [str(u) for u in admin_from_config]
-
-                # 加载多语言和个人订阅配置
-                raw_translation_provider_id = astrbot_config.get("translation_provider_id")
-                logger.info(f"[配置加载] 从 AstrBot 读取 translation_provider_id: '{raw_translation_provider_id}'")
-                
-                default_config["default_language"] = astrbot_config.get(
-                    "default_language", default_config["default_language"]
-                )
-                default_config["enable_personal_subscribe"] = astrbot_config.get(
-                    "enable_personal_subscribe", default_config["enable_personal_subscribe"]
-                )
-                default_config["personal_inform_hour"] = astrbot_config.get(
-                    "personal_inform_hour", default_config["personal_inform_hour"]
-                )
-                default_config["personal_inform_minute"] = astrbot_config.get(
-                    "personal_inform_minute", default_config["personal_inform_minute"]
-                )
-                default_config["enable_llm_translation"] = astrbot_config.get(
-                    "enable_llm_translation", default_config["enable_llm_translation"]
-                )
-                default_config["translation_provider_id"] = astrbot_config.get(
-                    "translation_provider_id", default_config["translation_provider_id"]
-                )
-                
-                logger.info(f"[配置加载] 最终 translation_provider_id: '{default_config['translation_provider_id']}'")
-        except Exception as e:
-            logger.warning(f"从 AstrBot 配置加载失败，使用默认配置: {e}")
-
-        # 加载订阅配置（动态修改的）
+        # 加载订阅配置
         if os.path.exists(self.subscription_file):
             try:
                 with open(self.subscription_file, 'r', encoding='utf-8') as f:
                     sub_data = json.load(f)
                     if "subscribed_groups" in sub_data:
-                        default_config["subscribed_groups"] = sub_data["subscribed_groups"]
+                        self.subscribed_groups = sub_data["subscribed_groups"]
                     if "group_origins" in sub_data:
                         self.group_origins = sub_data["group_origins"]
             except json.JSONDecodeError as e:
@@ -176,28 +135,12 @@ class LeetCodePlugin(Star):
             except Exception as e:
                 logger.error(f"加载订阅配置失败: {e}")
 
-        self.check_interval_seconds = default_config["check_interval_seconds"]
-        self.inform_hour = default_config["inform_hour"]
-        self.inform_minute = default_config["inform_minute"]
-        self.admin_users = default_config["admin_users"]
-        self.subscribed_groups = default_config["subscribed_groups"]
-
-        # 多语言和个人订阅配置
-        self.default_language = default_config.get("default_language", "zh")
-        self.enable_personal_subscribe = default_config.get("enable_personal_subscribe", True)
-        self.personal_inform_hour = default_config.get("personal_inform_hour", 9)
-        self.personal_inform_minute = default_config.get("personal_inform_minute", 30)
-
-        # 大模型翻译配置
-        self.enable_llm_translation = default_config.get("enable_llm_translation", True)
-        self.translation_provider_id = default_config.get("translation_provider_id", "")
-        
-        # 调试日志：打印翻译配置
-        logger.info(f"[配置加载] enable_llm_translation: {self.enable_llm_translation}")
-        logger.info(f"[配置加载] translation_provider_id: '{self.translation_provider_id}'")
-
         # 加载个人订阅配置
         self._load_personal_subscription()
+
+        # 调试日志：打印配置
+        logger.info(f"[配置加载] enable_llm_translation: {self.enable_llm_translation}")
+        logger.info(f"[配置加载] translation_provider_id: '{self.translation_provider_id}'")
 
     def _get_group_id(self, event: AstrMessageEvent) -> Optional[str]:
         """获取群组ID"""
