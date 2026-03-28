@@ -9,6 +9,7 @@ import json
 import os
 import re
 from datetime import datetime
+from html.parser import HTMLParser
 from typing import Dict, Optional
 
 from astrbot.api import logger
@@ -28,6 +29,8 @@ DEFAULTS = {
     "personal_inform_minute": 30,
     "enable_llm_translation": True,
     "translation_provider_id": "",
+    "enable_image_push": False,
+
 }
 
 
@@ -37,19 +40,158 @@ def _get(config: dict, key: str):
     return val if val is not None else DEFAULTS[key]
 
 
-def clean_html(html_content: str) -> str:
-    """清理HTML标签，提取纯文本"""
+class _LeetCodeHTMLToMarkdown(HTMLParser):
+    """将 LeetCode 题目 HTML 转换为 Markdown。"""
+
+    def __init__(self):
+        super().__init__()
+        self._result: list[str] = []
+        self._list_depth: int = 0
+        self._in_pre: bool = False
+        self._code_lang: str = ""
+        self._in_code: bool = False
+        self._code_buf: list[str] = []
+        self._in_li: bool = False
+        self._in_p: bool = False
+        self._in_strong: bool = False
+        self._in_em: bool = False
+        self._in_heading: bool = False
+        self._heading_level: int = 0
+
+    # ---- handlers ----
+    def handle_starttag(self, tag: str, attrs: list):
+        t = tag.lower()
+        if t == "pre":
+            self._in_pre = True
+            self._code_buf = []
+        elif t == "code" and not self._in_pre:
+            self._in_code = True
+            self._code_buf = []
+        elif t == "p":
+            self._in_p = True
+            self._maybe_newline()
+        elif t in ("ul", "ol"):
+            self._list_depth += 1
+            self._maybe_newline()
+        elif t == "li":
+            self._in_li = True
+            indent = "  " * (self._list_depth - 1)
+            self._result.append(f"\n{indent}- ")
+        elif t == "strong" or t == "b":
+            self._in_strong = True
+            self._result.append("**")
+        elif t == "em" or t == "i":
+            self._in_em = True
+            self._result.append("*")
+        elif t in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._in_heading = True
+            self._heading_level = int(t[1])
+            self._maybe_newline()
+        elif t == "br":
+            self._result.append("\n")
+        elif t == "sup":
+            self._result.append("^")
+        elif t == "sub":
+            self._result.append("_")
+        elif t == "blockquote":
+            self._maybe_newline()
+            self._result.append("> ")
+        elif t == "hr":
+            self._maybe_newline()
+            self._result.append("\n---\n")
+
+    def handle_endtag(self, tag: str):
+        t = tag.lower()
+        if t == "pre":
+            self._in_pre = False
+            lang = self._code_lang or ""
+            self._result.append(f"\n```{lang}\n")
+            self._result.append("".join(self._code_buf).strip())
+            self._result.append("\n```\n")
+            self._code_buf = []
+            self._code_lang = ""
+        elif t == "code" and not self._in_pre:
+            self._in_code = False
+            self._result.append("`")
+            self._result.append("".join(self._code_buf))
+            self._result.append("`")
+            self._code_buf = []
+        elif t == "p":
+            self._in_p = False
+            self._result.append("\n\n")
+        elif t in ("ul", "ol"):
+            self._list_depth = max(0, self._list_depth - 1)
+            self._maybe_newline()
+        elif t == "li":
+            self._in_li = False
+        elif t == "strong" or t == "b":
+            self._in_strong = False
+            self._result.append("**")
+        elif t == "em" or t == "i":
+            self._in_em = False
+            self._result.append("*")
+        elif t in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._in_heading = False
+            self._result.append(f"\n{'#' * self._heading_level} ")
+        elif t == "blockquote":
+            self._result.append("\n\n")
+
+    def handle_data(self, data: str):
+        text = data
+        # 在 <pre><code class="..."> 中提取语言标识
+        if self._in_pre and not self._code_buf and not self._code_lang:
+            stripped = text.strip()
+            if stripped:
+                # code 开头处的空白/换行直接跳过
+                return
+        if self._in_pre:
+            self._code_buf.append(text)
+        elif self._in_code:
+            self._code_buf.append(text)
+        else:
+            # 普通文本：保留内部空白
+            self._result.append(text)
+
+    def handle_entityref(self, name: str):
+        entities = {"quot": '"', "amp": "&", "lt": "<", "gt": ">", "nbsp": " ", "#39": "'"}
+        self._result.append(entities.get(name, f"&{name};"))
+
+    def handle_charref(self, name: str):
+        try:
+            if name.startswith("x"):
+                ch = chr(int(name[1:], 16))
+            else:
+                ch = chr(int(name))
+            self._result.append(ch)
+        except (ValueError, OverflowError):
+            self._result.append(f"&#{name};")
+
+    # ---- helpers ----
+    def _maybe_newline(self):
+        if self._result and self._result[-1] and self._result[-1][-1] != "\n":
+            self._result.append("\n")
+
+    def get_markdown(self) -> str:
+        raw = "".join(self._result)
+        # 清理多余空行（连续3个以上换行缩减为2个）
+        raw = re.sub(r"\n{3,}", "\n\n", raw)
+        return raw.strip()
+
+
+def html_to_markdown(html_content: str) -> str:
+    """将 LeetCode 题目 HTML 转为 Markdown 格式。"""
     if not html_content:
         return ""
-    # 移除HTML标签
-    text = re.sub(r'<[^>]+>', '', html_content)
-    # 解码HTML实体
-    text = text.replace('&quot;', '"').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('&nbsp;', ' ').replace('&#39;', "'")
-    # 移除多余空白
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    text = text.strip()
-    return text
+    parser = _LeetCodeHTMLToMarkdown()
+    try:
+        parser.feed(html_content)
+        return parser.get_markdown()
+    except Exception:
+        # 兜底：如果解析失败，回退到简单清理
+        text = re.sub(r"<[^>]+>", "", html_content)
+        text = text.replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        text = text.replace("&nbsp;", " ").replace("&#39;", "'")
+        return re.sub(r"\n\s*\n", "\n\n", text).strip()
 
 
 # ============ 配置常量 ============
@@ -80,6 +222,7 @@ class LeetCodePlugin(Star):
         self.user_origins: Dict[str, str] = {}  # 保存用户的 unified_msg_origin
         self.subscribed_users: list = []   # 订阅用户ID列表
         self.user_language_prefs: Dict[str, str] = {}  # 用户语言偏好设置
+        self.user_push_times: Dict[str, Dict[str, int]] = {}  # 用户自定义推送时间
 
         # 从 AstrBotConfig 读取配置
         self.admin_users: list = [str(u) for u in _get(config, "admin_users")]
@@ -89,6 +232,8 @@ class LeetCodePlugin(Star):
         self.personal_inform_minute: int = int(_get(config, "personal_inform_minute"))
         self.enable_llm_translation: bool = bool(_get(config, "enable_llm_translation"))
         self.translation_provider_id: str = _get(config, "translation_provider_id")
+        self.enable_image_push: bool = bool(_get(config, "enable_image_push"))
+
 
         # 加载动态订阅配置
         self._load_subscription_config()
@@ -109,6 +254,9 @@ class LeetCodePlugin(Star):
 
         # 异步任务
         self._monitor_task: Optional[asyncio.Task] = None
+
+        # CronJob 管理（user_id -> job_id 映射）
+        self.user_cron_jobs: Dict[str, str] = {}
 
         logger.info(f"LeetCode 每日一题提醒插件已加载")
 
@@ -177,6 +325,7 @@ class LeetCodePlugin(Star):
                     self.subscribed_users = data.get("subscribed_users", [])
                     self.user_origins = data.get("user_origins", {})
                     self.user_language_prefs = data.get("user_language_prefs", {})
+                    self.user_push_times = data.get("user_push_times", {})
             except json.JSONDecodeError as e:
                 logger.error(f"个人订阅配置JSON格式错误: {e}")
             except Exception as e:
@@ -189,7 +338,8 @@ class LeetCodePlugin(Star):
                 data = {
                     "subscribed_users": self.subscribed_users,
                     "user_origins": self.user_origins,
-                    "user_language_prefs": self.user_language_prefs
+                    "user_language_prefs": self.user_language_prefs,
+                    "user_push_times": self.user_push_times,
                 }
                 with open(self.personal_subscription_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -201,10 +351,102 @@ class LeetCodePlugin(Star):
         return str(event.get_sender_id())
 
     def _save_user_origin(self, event: AstrMessageEvent):
-        """保存用户的统一会话标识"""
+        """保存用户的统一会话标识（使用 session 对象确保 platform_id 正确）"""
         user_id = self._get_user_id(event)
-        if hasattr(event, 'unified_msg_origin'):
+        if hasattr(event, 'session') and event.session:
+            # event.session 是 MessageSession 对象，str(event.session) 会输出
+            # "正确的platform_id:MessageType:session_id"
+            self.user_origins[user_id] = str(event.session)
+        elif hasattr(event, 'unified_msg_origin'):
             self.user_origins[user_id] = event.unified_msg_origin
+
+    def _get_user_push_time(self, user_id: str) -> tuple:
+        """获取用户的推送时间，优先使用自定义时间，否则用配置默认值。返回 (hour, minute)"""
+        if user_id in self.user_push_times:
+            pt = self.user_push_times[user_id]
+            return pt.get("hour", self.personal_inform_hour), pt.get("minute", self.personal_inform_minute)
+        return self.personal_inform_hour, self.personal_inform_minute
+
+    def _format_push_time(self, user_id: str) -> str:
+        """格式化用户的推送时间显示"""
+        h, m = self._get_user_push_time(user_id)
+        is_custom = user_id in self.user_push_times
+        custom_tag = "（自定义）" if is_custom else "（默认）"
+        return f"{h:02d}:{m:02d} {custom_tag}"
+
+    async def _register_cron_for_user(self, user_id: str, umo: str):
+        """为指定用户注册 CronJob（Basic 模式）"""
+        if not self.enable_personal_subscribe:
+            return
+
+        # 如果已存在，先取消旧的
+        if user_id in self.user_cron_jobs:
+            await self._unregister_cron_for_user(user_id)
+
+        user_lang = self._get_user_language(user_id)
+        hour, minute = self._get_user_push_time(user_id)
+        cron_expression = f"{minute} {hour} * * *"
+
+        async def handler(**kwargs):
+            """定时回调：获取题目并发送给订阅者（与测试推送走同一条路径）"""
+            try:
+                user_id = kwargs.get("user_id")
+                question = await self._fetch_daily_question()
+                if question:
+                    text = self._build_question_message(question, kwargs.get("lang", self.default_language))
+                    sent = await self._send_private_message(user_id, text, use_image=self.enable_image_push)
+                    if sent:
+                        logger.info(f"[CronJob] LeetCode每日一题已推送到用户 {user_id}")
+                    else:
+                        logger.error(f"[CronJob] 推送失败 user={user_id}")
+            except Exception as e:
+                logger.error(f"[CronJob] 推送异常 user={kwargs.get('user_id')}: {e}")
+
+        try:
+            job = await self.context.cron_manager.add_basic_job(
+                name=f"lc_personal_{user_id}",
+                cron_expression=cron_expression,
+                handler=handler,
+                description=f"LeetCode每日一题个人订阅: {user_id}",
+                timezone="Asia/Shanghai",
+                payload={"umo": umo, "lang": user_lang, "user_id": user_id},
+                enabled=True,
+                persistent=False,  # 重启后由插件重新注册
+            )
+            self.user_cron_jobs[user_id] = job.job_id
+            logger.info(f"[CronJob] 已为用户 {user_id} 注册定时任务，执行时间: {cron_expression}")
+        except Exception as e:
+            logger.error(f"[CronJob] 注册用户 {user_id} 的定时任务失败: {e}")
+
+    async def _unregister_cron_for_user(self, user_id: str):
+        """取消指定用户的 CronJob"""
+        job_id = self.user_cron_jobs.get(user_id)
+        if job_id:
+            try:
+                await self.context.cron_manager.delete_job(job_id)
+                del self.user_cron_jobs[user_id]
+                logger.info(f"[CronJob] 已取消用户 {user_id} 的定时任务")
+            except Exception as e:
+                logger.error(f"[CronJob] 取消用户 {user_id} 的定时任务失败: {e}")
+
+    async def _restore_all_personal_cron_jobs(self):
+        """插件启动时恢复所有个人订阅的 CronJob"""
+        if not self.enable_personal_subscribe:
+            return
+
+        logger.info(f"[CronJob] 开始恢复 {len(self.subscribed_users)} 个个人订阅的定时任务...")
+        restored_count = 0
+
+        for user_id in self.subscribed_users:
+            umo = self.user_origins.get(user_id)
+            if umo:
+                await self._register_cron_for_user(user_id, umo)
+                restored_count += 1
+                await asyncio.sleep(0.1)  # 避免过快注册
+            else:
+                logger.warning(f"[CronJob] 用户 {user_id} 缺少 UMO，跳过恢复")
+
+        logger.info(f"[CronJob] 成功恢复 {restored_count} 个个人订阅定时任务")
 
     def _get_session_for_user(self, user_id: str) -> str:
         """获取用户的会话标识"""
@@ -232,6 +474,8 @@ class LeetCodePlugin(Star):
     async def initialize(self):
         """插件初始化时执行"""
         self._monitor_task = asyncio.create_task(self._async_monitor())
+        # 恢复个人订阅的 CronJob
+        await self._restore_all_personal_cron_jobs()
 
     async def terminate(self):
         """插件卸载时清理资源"""
@@ -241,12 +485,14 @@ class LeetCodePlugin(Star):
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
+        # 清理所有个人订阅的 CronJob
+        for user_id in list(self.user_cron_jobs.keys()):
+            await self._unregister_cron_for_user(user_id)
 
     async def _async_monitor(self):
-        """异步监控任务"""
+        """异步监控任务（仅用于群组订阅）"""
         logger.info("LeetCode 每日一题监控任务已启动")
         last_inform_date = ""      # 群组推送日期记录
-        last_personal_inform_date = ""  # 个人推送日期记录
 
         try:
             while True:
@@ -268,21 +514,6 @@ class LeetCodePlugin(Star):
                             last_inform_date = today_date
                             logger.info(f"LeetCode 每日一题已推送到群组: {question.get('title', '未知')}")
 
-                    # 检查个人订阅推送时间（可以设置不同时间）
-                    if (self.enable_personal_subscribe and
-                        now.hour == self.personal_inform_hour and
-                        now.minute == self.personal_inform_minute and
-                        today_date != last_personal_inform_date):
-
-                        logger.info(f"开始获取 LeetCode 每日一题(个人): {today_date}")
-                        question = await self._fetch_daily_question()
-                        if question:
-                            self.today_question = question
-                            self.today_date = today_date
-                            await self._send_question_to_personal_subscribers(question)
-                            last_personal_inform_date = today_date
-                            logger.info(f"LeetCode 每日一题已推送到个人: {question.get('title', '未知')}")
-
                 except Exception as e:
                     logger.error(f"LeetCode 监控任务出错: {e}")
 
@@ -292,37 +523,53 @@ class LeetCodePlugin(Star):
             logger.info("LeetCode 每日一题监控任务已停止")
 
     async def _fetch_daily_question(self, umo: str = None) -> Optional[Dict]:
-        """获取 LeetCode 每日一题 - 使用内置的 urllib
+        """获取 LeetCode 每日一题 - 使用内置的 urllib，含自动重试
         
         Args:
             umo: 统一消息来源标识，用于获取当前会话的LLM提供商（翻译用）
         """
+        import urllib.request
+        import urllib.error
+        import ssl
+
+        url = "https://leetcode-api-pied.vercel.app/daily"
+        logger.info(f"[每日一题] 开始获取，URL: {url}, umo: {umo}")
+
+        # 创建SSL上下文，忽略证书验证
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+        # 使用线程池执行同步请求
+        loop = asyncio.get_event_loop()
+
+        def fetch():
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+            with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                return response.read().decode('utf-8')
+
+        # 重试机制：最多重试 3 次，间隔 1s
+        max_retries = 3
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response_text = await loop.run_in_executor(None, fetch)
+                break
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+                last_error = e
+                logger.warning(f"[每日一题] 第 {attempt}/{max_retries} 次请求失败: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+        else:
+            logger.error(f"[每日一题] 获取 LeetCode 每日一题失败（已重试 {max_retries} 次）: {last_error}", exc_info=True)
+            return None
+
         try:
-            import urllib.request
-            import ssl
-
-            url = "https://leetcode-api-pied.vercel.app/daily"
-            logger.info(f"[每日一题] 开始获取，URL: {url}, umo: {umo}")
-
-            # 创建SSL上下文，忽略证书验证
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            # 使用线程池执行同步请求
-            loop = asyncio.get_event_loop()
-
-            def fetch():
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
-                )
-                with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
-                    return response.read().decode('utf-8')
-
-            response_text = await loop.run_in_executor(None, fetch)
             logger.info(f"[每日一题] API 原始响应: {response_text[:500]}...")
 
             data = json.loads(response_text)
@@ -405,7 +652,7 @@ class LeetCodePlugin(Star):
             logger.info(f"[LLM翻译] 开始翻译{'标题' if is_title else '内容'}: {title[:50] if title else 'Unknown'}...")
             
             # 清理HTML内容
-            clean_content = clean_html(content) if content else ""
+            clean_content = html_to_markdown(content) if content else ""
             
             if is_title:
                 # 只翻译标题
@@ -429,7 +676,7 @@ class LeetCodePlugin(Star):
 
 中文翻译:"""
 
-            # 调用LLM - 优先级: 1)配置的翻译提供商 2)当前会话提供商 3)默认提供商
+            # 调用LLM - 优先级: 1)配置的翻译提供商 2)当前会话提供商 3)全局默认提供商
             logger.info(f"[LLM翻译] 优先级判断 - self.translation_provider_id: '{self.translation_provider_id}', umo: '{umo}'")
             if self.translation_provider_id:
                 # 优先使用配置的专用翻译提供商
@@ -440,9 +687,14 @@ class LeetCodePlugin(Star):
                 provider_id = await self.context.get_current_chat_provider_id(umo=umo)
                 logger.info(f"[LLM翻译] 使用当前会话的LLM提供商: {provider_id}")
             else:
-                # 使用默认提供商
-                provider_id = None
-                logger.info("[LLM翻译] 使用默认LLM提供商")
+                # 兜底：使用全局默认提供商
+                prov = self.context.get_using_provider(umo=None)
+                if prov:
+                    provider_id = prov.meta().id
+                    logger.info(f"[LLM翻译] 使用全局默认LLM提供商: {provider_id}")
+                else:
+                    logger.warning("[LLM翻译] 未找到可用的LLM提供商，跳过LLM翻译")
+                    return ""
             
             llm_resp = await self.context.llm_generate(
                 chat_provider_id=provider_id,
@@ -508,68 +760,142 @@ class LeetCodePlugin(Star):
             question_id: 题目编号
             umo: 统一消息来源标识，用于获取当前会话的LLM提供商（翻译用）
         """
-        try:
-            import urllib.request
-            import ssl
+        import urllib.request
+        import urllib.error
+        import ssl
 
-            # 使用 lcid.cc API 获取题目信息
-            url = f"https://lcid.cc/info/{question_id}"
-            logger.info(f"正在获取题目 {question_id}: {url}")
+        # 创建SSL上下文，忽略证书验证
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
 
-            # 创建SSL上下文，忽略证书验证
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+        # 使用线程池执行同步请求
+        loop = asyncio.get_event_loop()
 
-            # 使用线程池执行同步请求
-            loop = asyncio.get_event_loop()
-
-            def fetch():
+        def http_get(url, post_data=None):
+            if post_data:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(post_data).encode('utf-8'),
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Content-Type': 'application/json',
+                        'Referer': 'https://leetcode.com/'
+                    }
+                )
+            else:
                 req = urllib.request.Request(
                     url,
                     headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
                 )
-                with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
-                    return response.read().decode('utf-8')
+            with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                return response.read().decode('utf-8')
 
-            response_text = await loop.run_in_executor(None, fetch)
-            logger.info(f"题目 {question_id} 响应: {response_text[:200]}")
+        async def fetch_with_retry(url, max_retries=3, post_data=None, log_prefix="[题目查询]"):
+            last_error = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response_text = await loop.run_in_executor(None, lambda u=url, p=post_data: http_get(u, p))
+                    return response_text
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+                    last_error = e
+                    logger.warning(f"{log_prefix} 第 {attempt}/{max_retries} 次请求失败: {e}")
+                    if attempt < max_retries:
+                        await asyncio.sleep(1)
+            logger.error(f"{log_prefix} 获取失败（已重试 {max_retries} 次）: {last_error}", exc_info=True)
+            return None
 
-            data = json.loads(response_text)
+        # 第一步：使用 lcid.cc API 获取题目元数据（标题、slug、难度等）
+        meta_url = f"https://lcid.cc/info/{question_id}"
+        logger.info(f"正在获取题目 {question_id}: {meta_url}")
 
-            # 获取英文标题和内容（lcid.cc 返回的是 titleSlug 字段）
+        meta_text = await fetch_with_retry(meta_url, log_prefix="[题目查询]")
+        if not meta_text:
+            return None
+
+        try:
+            logger.info(f"题目 {question_id} 响应: {meta_text[:200]}")
+            data = json.loads(meta_text)
+
             title = data.get("title", "")
             slug = data.get("titleSlug", "")
-            content_en = data.get("content", "")
-            
-            logger.info(f"[题目查询] 英文内容 - 标题: {title}, slug: {slug}, 内容长度: {len(content_en) if content_en else 0}")
+
+            if not slug:
+                logger.error(f"题目 {question_id} 未获取到 titleSlug")
+                return None
+
+            logger.info(f"[题目查询] 标题: {title}, slug: {slug}")
+
+            # 第二步：使用 LeetCode GraphQL API 获取完整题干和标签
+            content_en = ""
+            topic_tags = []
+
+            graphql_url = "https://leetcode.com/graphql"
+            graphql_query = {
+                "query": """
+                query questionData($titleSlug: String!) {
+                    question(titleSlug: $titleSlug) {
+                        content
+                        topicTags {
+                            name
+                            nameTranslated: translatedName
+                            slug
+                        }
+                    }
+                }
+                """,
+                "variables": {"titleSlug": slug}
+            }
+
+            logger.info(f"[题目查询] 通过 GraphQL 获取题干，slug: {slug}")
+            gql_text = await fetch_with_retry(graphql_url, post_data=graphql_query, log_prefix="[题目查询] GraphQL")
+
+            if gql_text:
+                try:
+                    gql_data = json.loads(gql_text)
+                    q_data = gql_data.get("data", {}).get("question", {})
+                    if q_data:
+                        content_en = q_data.get("content", "")
+                        topic_tags = q_data.get("topicTags", [])
+                        logger.info(f"[题目查询] GraphQL 获取成功，内容长度: {len(content_en) if content_en else 0}, 标签数: {len(topic_tags)}")
+                    else:
+                        logger.warning(f"[题目查询] GraphQL 返回的 question 为空")
+                except Exception as e:
+                    logger.warning(f"[题目查询] 解析 GraphQL 响应失败: {e}")
+            else:
+                logger.warning(f"[题目查询] GraphQL 请求失败，题干将为空")
 
             # 使用大模型翻译获取中文内容
             title_cn = ""
             content_cn = ""
             content_cn_failed = False
-            
-            # 只要有标题就翻译标题（lcid.cc /info 端点不返回内容，只翻译标题即可）
+
             if self.enable_llm_translation and title:
-                logger.info(f"[题目查询] 准备使用大模型翻译标题，umo: {umo}")
+                logger.info(f"[题目查询] 准备使用大模型翻译，umo: {umo}")
                 try:
-                    # 只翻译标题，内容留空
-                    title_cn = await self._translate_title_with_llm(title, umo=umo)
-                    if title_cn:
-                        logger.info(f"[题目查询] 标题翻译成功: {title_cn}")
+                    if content_en:
+                        title_cn, content_cn, translation_success = await self._fetch_chinese_content(
+                            slug, title, content_en, umo=umo
+                        )
+                        if not translation_success:
+                            content_cn_failed = True
+                            logger.warning(f"[题目查询] 大模型翻译未完全成功")
                     else:
-                        content_cn_failed = True
-                        logger.warning(f"[题目查询] 标题翻译失败")
+                        title_cn = await self._translate_title_with_llm(title, umo=umo)
+                        if title_cn:
+                            logger.info(f"[题目查询] 标题翻译成功: {title_cn}")
+                        else:
+                            content_cn_failed = True
+                            logger.warning(f"[题目查询] 标题翻译失败")
                 except Exception as e:
-                    logger.warning(f"[题目查询] 标题翻译失败: {e}")
+                    logger.warning(f"[题目查询] 大模型翻译失败: {e}")
                     content_cn_failed = True
             else:
                 logger.info(f"[题目查询] 大模型翻译已禁用或无标题")
                 content_cn_failed = True
-            
-            # 如果没有翻译成功，使用英文作为后备
+
             if not title_cn:
                 title_cn = title
 
@@ -581,9 +907,9 @@ class LeetCodePlugin(Star):
                 "titleSlug": slug,
                 "frontendQuestionId": str(data.get("id", question_id)),
                 "difficulty": data.get("difficulty", ""),
-                "acRate": 0,
+                "acRate": data.get("acRate", 0) / 100.0 if data.get("acRate") else 0,
                 "link": f"https://leetcode.com/problems/{slug}/",
-                "topicTags": [],
+                "topicTags": topic_tags,
                 "content": content_en,
                 "contentCn": content_cn,
                 "contentCnFailed": content_cn_failed
@@ -669,8 +995,8 @@ class LeetCodePlugin(Star):
         logger.info(f"[构建消息] 内容处理 - content长度: {len(content) if content else 0}, contentCn长度: {len(content_cn) if content_cn else 0}, 失败: {content_cn_failed}, language: {language}")
 
         if content or content_cn:
-            clean_content_en = clean_html(content) if content else ""
-            clean_content_cn = clean_html(content_cn) if content_cn else ""
+            clean_content_en = html_to_markdown(content) if content else ""
+            clean_content_cn = html_to_markdown(content_cn) if content_cn else ""
             
             # 根据语言设置显示内容
             if language == "zh":
@@ -743,6 +1069,9 @@ class LeetCodePlugin(Star):
 
         return result_text
 
+
+
+
     async def _send_question_to_subscribers(self, question: Dict):
         """发送题目到所有群组订阅者"""
         text = self._build_question_message(question, self.default_language)
@@ -759,32 +1088,21 @@ class LeetCodePlugin(Star):
                 logger.error(f"发送题目到群 {group_id} 失败: {e}")
 
     def _get_platforms(self) -> list:
-        """获取可用的平台实例列表，返回 [(platform, umo_prefix), ...]。"""
-        from astrbot.api.event.filter import PlatformAdapterType
+        """获取可用的平台实例列表，返回 [(platform, platform_name), ...]。
+        
+        直接遍历 platform_manager.platform_insts，通过 meta().name 匹配，
+        不依赖已废弃的 get_platform() 方法。
+        """
         results = []
-        platform_configs = [
-            (PlatformAdapterType.AIOCQHTTP, "aiocqhttp:FriendMessage"),
-            (PlatformAdapterType.QQOFFICIAL, "qq_official:FriendMessage"),
-        ]
-        for adapter_type, umo_prefix in platform_configs:
-            try:
-                platform = self.context.get_platform(adapter_type)
-                if platform:
-                    results.append((platform, umo_prefix))
-            except Exception:
-                continue
+        target_names = {"aiocqhttp", "qq_official"}
+        try:
+            for platform in self.context.platform_manager.platform_insts:
+                name = platform.meta().name
+                if name in target_names:
+                    results.append((platform, name))
+        except Exception:
+            pass
         return results
-
-    @staticmethod
-    def _get_call_action(platform):
-        """从平台实例中提取 OneBot call_action 方法，找不到返回 None。"""
-        client = getattr(platform, 'get_client', lambda: None)() or \
-                 getattr(platform, 'client', None) or \
-                 getattr(platform, 'bot', None)
-        if not client:
-            return None
-        return getattr(client, 'call_action', None) or \
-               getattr(getattr(client, 'api', None), 'call_action', None)
 
     def _is_qq_number(self, user_id: str) -> bool:
         """判断是否为纯数字QQ号（aiocqhttp格式）"""
@@ -794,94 +1112,148 @@ class LeetCodePlugin(Star):
         """判断是否为openid（QQ官方API格式，如 264EBBDDA1378C38708B398008FA66F3）"""
         return len(user_id) == 32 and all(c in '0123456789ABCDEFabcdef' for c in user_id)
 
-    async def _send_private_message(self, user_id: str, text: str) -> bool:
-        """发送私信给用户，支持多平台适配（aiocqhttp + QQ官方API）。
-        
-        策略：
-        1. 根据ID格式判断平台类型，使用对应的 OneBot API
-        2. aiocqhttp: 使用 user_id (int)
-        3. QQ官方API: 使用 user_openid (str)
-        4. 失败则用 context.send_message + UMO 兜底
-        
+    async def _send_private_message(self, user_id: str, text: str, use_image: bool = False) -> bool:
+        """发送私信给用户，支持多平台适配。
+
+        Args:
+            user_id: 用户ID
+            text: 要发送的文本内容
+            use_image: 是否使用文转图发送（默认纯文本）
+
+        策略（按优先级）：
+        1. aiocqhttp: 使用 bot.send_private_msg 直接发送
+        2. qq_official: 使用 post_c2c_message API 直接发私聊（绕过 send_by_session 的 msg_id 检查）
+        3. 通用兜底: 通过 context.send_message(umo) 发送，兼容飞书、Telegram、Discord 等所有平台
+
         Returns:
             bool: 是否发送成功
         """
-        from astrbot.api.event.filter import PlatformAdapterType
-        
-        platforms = self._get_platforms()
+        import random
+
         sent = False
         is_qq_num = self._is_qq_number(user_id)
         is_openid = self._is_openid(user_id)
 
-        logger.info(f"[私信发送] 开始发送 user={user_id}, 类型={'QQ号' if is_qq_num else 'openid' if is_openid else '未知'}")
-
-        # 策略1: 根据ID类型选择合适的平台和API
-        for platform, umo_prefix in platforms:
-            call_action = self._get_call_action(platform)
-            if not call_action:
-                continue
-            
+        # 如果启用文转图，先尝试渲染图片
+        image_file = None
+        if use_image:
             try:
-                # 判断平台类型
-                platform_type = None
-                try:
-                    # 尝试从 platform 对象获取类型信息
-                    platform_name = getattr(platform, 'name', '') or getattr(platform, 'adapter_name', '')
-                    if 'official' in platform_name.lower() or 'qq_official' in platform_name.lower():
-                        platform_type = 'qq_official'
-                    elif 'aiocqhttp' in platform_name.lower():
-                        platform_type = 'aiocqhttp'
-                except:
-                    pass
-                
-                # 根据ID格式和平台类型选择发送方式
-                if is_openid or platform_type == 'qq_official':
-                    # QQ官方API: 使用 user_openid
-                    await call_action("send_private_msg", user_openid=user_id, message=text)
-                    logger.info(f"[私信发送] QQ官方API发送成功 user_openid={user_id}")
-                else:
-                    # aiocqhttp: 使用 user_id (int)
-                    await call_action("send_private_msg", user_id=int(user_id), message=text)
-                    logger.info(f"[私信发送] aiocqhttp发送成功 user_id={user_id}")
-                
-                sent = True
-                break
+                chain = await self._text_to_image_chain(text)
+                from astrbot.core.message.components import Plain
+                first = chain.chain[0]
+                if not isinstance(first, Plain):
+                    image_file = first.file  # Image 组件的 file 属性
             except Exception as e:
-                logger.debug(f"[私信发送] 平台发送失败 user={user_id}: {e}")
-                continue
+                logger.warning(f"[私信发送] 文转图失败，回退纯文本: {e}")
 
-        # 策略2: context.send_message + UMO 兜底
+        logger.info(f"[私信发送] 开始发送 user={user_id}, 类型={'QQ号' if is_qq_num else 'openid' if is_openid else '其他平台'}, 文转图={'是' if use_image else '否'}")
+
+        # 策略1 & 2: QQ 系平台使用底层 API（绕过框架高层 API 的限制）
+        if is_qq_num or is_openid:
+            platforms = self._get_platforms()
+            for platform, platform_name in platforms:
+                try:
+                    if platform_name == "aiocqhttp" and is_qq_num:
+                        bot = getattr(platform, 'bot', None)
+                        if not bot:
+                            logger.debug(f"[私信发送] aiocqhttp 平台缺少 bot 实例")
+                            continue
+                        if image_file:
+                            msg_list = [{"type": "image", "data": {"file": image_file}}]
+                        else:
+                            msg_list = [{"type": "text", "data": {"text": text}}]
+                        await bot.send_private_msg(user_id=int(user_id), message=msg_list)
+                        sent = True
+                        logger.info(f"[私信发送] aiocqhttp发送成功 user_id={user_id}")
+                        break
+
+                    elif platform_name == "qq_official" and is_openid:
+                        client = getattr(platform, 'client', None)
+                        if not client:
+                            logger.debug(f"[私信发送] qq_official 平台缺少 client 实例")
+                            continue
+                        from botpy.http import Route
+                        route = Route("POST", "/v2/users/{openid}/messages", openid=user_id)
+                        if image_file:
+                            # QQ官方API图片消息需要先上传图片获取file_info
+                            payload = {
+                                "content": json.dumps({"file_info": image_file}),
+                                "msg_type": 7,
+                                "media": {"file_info": image_file},
+                                "msg_seq": random.randint(1, 10000),
+                            }
+                        else:
+                            from botpy.types.message import MarkdownPayload
+                            payload = {
+                                "markdown": MarkdownPayload(content=text) if text else None,
+                                "msg_type": 2,
+                                "msg_seq": random.randint(1, 10000),
+                            }
+                        result = await client.api._http.request(route, json=payload)
+                        if result is None:
+                            logger.warning(f"[私信发送] qq_official API 返回 None user={user_id}")
+                            continue
+                        # markdown 消息发送失败时降级为纯文本
+                        if isinstance(result, dict) and "不允许发送原生 markdown" in str(result):
+                            logger.info(f"[私信发送] qq_official markdown不允许，降级为纯文本 user={user_id}")
+                            fallback_payload = {
+                                "content": text,
+                                "msg_type": 0,
+                                "msg_seq": random.randint(1, 10000),
+                            }
+                            fallback_route = Route("POST", "/v2/users/{openid}/messages", openid=user_id)
+                            result = await client.api._http.request(fallback_route, json=fallback_payload)
+                            if result is None:
+                                continue
+                        sent = True
+                        logger.info(f"[私信发送] qq_official发送成功 user_openid={user_id}")
+                        break
+                except Exception as e:
+                    logger.debug(f"[私信发送] {platform_name} 发送失败 user={user_id}: {e}")
+                    continue
+
+        # 策略3: 通用兜底 — 通过框架 context.send_message 发送（适用于飞书、Telegram、Discord 等）
         if not sent:
             umo = self.user_origins.get(user_id)
             if umo:
                 try:
-                    logger.info(f"[私信发送] 尝试UMO兜底 user={user_id}, umo={umo}")
-                    await self.context.send_message(umo, text)
-                    sent = True
-                    logger.info(f"[私信发送] UMO兜底发送成功 user={user_id}")
+                    from astrbot.core.message.message_event_result import MessageChain
+                    from astrbot.core.message.components import Plain, Image
+                    if use_image and image_file:
+                        chain = MessageChain(chain=[Image.fromFileSystem(image_file)])
+                    else:
+                        chain = MessageChain(chain=[Plain(text)])
+                    sent = await self.context.send_message(umo, chain)
+                    if sent:
+                        logger.info(f"[私信发送] 通用兜底发送成功 user={user_id}")
+                    else:
+                        logger.warning(f"[私信发送] 通用兜底未找到匹配平台 user={user_id}")
                 except Exception as e:
-                    logger.debug(f"[私信发送] UMO兜底发送失败 user={user_id}: {e}")
+                    logger.error(f"[私信发送] 通用兜底发送失败 user={user_id}: {e}")
+            else:
+                logger.error(f"[私信发送] 所有策略均失败 user={user_id}（未找到该用户的平台会话记录）")
 
-        # 策略3: 直接尝试 user_id (构造UMO格式)
-        if not sent:
-            try:
-                # 根据ID类型构造不同的UMO
-                if is_openid:
-                    umo = f"qq_official:FriendMessage:{user_id}"
-                else:
-                    umo = f"aiocqhttp:FriendMessage:{user_id}"
-                
-                logger.info(f"[私信发送] 尝试构造UMO发送 user={user_id}, umo={umo}")
-                await self.context.send_message(umo, text)
-                sent = True
-                logger.info(f"[私信发送] 构造UMO发送成功 user={user_id}")
-            except Exception as e:
-                logger.debug(f"[私信发送] 构造UMO发送失败 user={user_id}: {e}")
-
-        if not sent:
-            logger.error(f"[私信发送] 所有策略均失败 user={user_id}")
-        
         return sent
+
+    async def _text_to_image_chain(self, text: str):
+        """将文本渲染为图片，失败时回退纯文本"""
+        from astrbot.core.message.message_event_result import MessageChain
+        from astrbot.core.message.components import Plain, Image
+        from astrbot.core import html_renderer
+        try:
+            image_path = await html_renderer.render_t2i(text, return_url=False)
+            if image_path:
+                logger.info(f"[文转图] 渲染成功: {image_path}")
+                return MessageChain(chain=[Image.fromFileSystem(image_path)])
+        except Exception as e:
+            logger.warning(f"[文转图] 渲染失败，回退纯文本: {e}")
+        return MessageChain(chain=[Plain(text)])
+
+
+
+
+
+
 
     async def _send_question_to_personal_subscribers(self, question: Dict):
         """发送题目到所有个人订阅者"""
@@ -952,6 +1324,7 @@ class LeetCodePlugin(Star):
 ➕ /lc订阅我 - 订阅每日一题私信推送
 ➖ /lc退订我 - 取消个人订阅
 📋 /lc我的状态 - 查看个人订阅状态
+⏰ /lc时间 [HH:MM] - 设置推送时间（如: /lc时间 8:00）
 
 【语言设置】
 🌐 /lc语言 [zh/en/both] - 设置题目显示语言
@@ -1007,6 +1380,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 【个人订阅】
 私聊我还可以使用个人订阅功能:
 • /lc订阅我 - 私信接收每日题目
+• /lc时间 [HH:MM] - 自定义推送时间
 • /lc语言 - 设置题目显示语言
 
 【配置】
@@ -1034,9 +1408,12 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
    每天会自动收到题目推送
 5️⃣ /lc退订我 - 取消个人订阅
 6️⃣ /lc我的状态 - 查看订阅状态和语言设置
+7️⃣ /lc时间 [HH:MM] - 设置推送时间
+   示例: /lc时间 8:00
+   示例: /lc时间 默认 (恢复默认时间)
 
 【语言设置】
-7️⃣ /lc语言 [zh/en/both] - 设置题目显示语言
+8️⃣ /lc语言 [zh/en/both] - 设置题目显示语言
    • zh   - 仅中文
    • en   - 仅英文
    • both - 双语显示
@@ -1118,13 +1495,14 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 
         today_date = datetime.now().strftime("%Y-%m-%d")
 
+        # 获取 umo 用于 LLM 翻译
+        umo = event.unified_msg_origin if hasattr(event, 'unified_msg_origin') else None
+
         # 检查缓存
         if self.today_question and self.today_date == today_date:
             question = self.today_question
         else:
             yield event.plain_result("⏳ 正在获取今日题目...")
-            # 传递 umo 以使用当前会话的 LLM 提供商进行翻译
-            umo = event.unified_msg_origin if hasattr(event, 'unified_msg_origin') else None
             question = await self._fetch_daily_question(umo=umo)
             if question:
                 self.today_question = question
@@ -1141,7 +1519,12 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             language = self._get_user_language(user_id)
 
         text = self._build_question_message(question, language)
-        yield event.plain_result(text)
+        from astrbot.core.message.message_event_result import MessageEventResult
+        if self.enable_image_push:
+            chain = await self._text_to_image_chain(text)
+            yield MessageEventResult(chain=chain.chain)
+        else:
+            yield event.plain_result(text)
 
     @filter.command("lc列表")
     async def cmd_list(self, event: AstrMessageEvent):
@@ -1223,6 +1606,81 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             f"后续收到的题目将以所选语言显示。"
         )
 
+    # ========== 个人推送时间配置 ==========
+
+    @filter.command("lc时间")
+    async def cmd_push_time(self, event: AstrMessageEvent, time_str: str = ""):
+        """查看或设置个人推送时间
+
+        用法:
+          /lc时间          - 查看当前推送时间
+          /lc时间 8:00     - 设置推送时间为 08:00
+          /lc时间 22:30    - 设置推送时间为 22:30
+          /lc时间 默认     - 恢复使用配置文件默认时间
+        """
+        user_id = self._get_user_id(event)
+
+        if self._get_group_id(event):
+            yield event.plain_result("❌ 此命令只能在私聊中使用\n请直接私信我发送 /lc时间")
+            return
+
+        # 无参数 → 查看当前推送时间
+        if not time_str.strip():
+            yield event.plain_result(
+                f"⏰ 当前推送时间: {self._format_push_time(user_id)}\n\n"
+                f"默认时间: {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d}\n\n"
+                f"设置方法: /lc时间 [HH:MM]\n"
+                f"示例: /lc时间 8:00\n"
+                f"恢复默认: /lc时间 默认"
+            )
+            return
+
+        time_str = time_str.strip()
+
+        # "默认" → 恢复配置默认值
+        if time_str in ["默认", "default"]:
+            if user_id in self.user_push_times:
+                del self.user_push_times[user_id]
+                await self._save_personal_subscription()
+            if user_id in self.subscribed_users:
+                umo = self.user_origins.get(user_id)
+                if umo:
+                    await self._register_cron_for_user(user_id, umo)
+            yield event.plain_result(
+                f"✅ 已恢复为默认推送时间: {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d}"
+            )
+            return
+
+        # 解析 HH:MM 格式
+        match = re.match(r'^(\d{1,2}):(\d{2})$', time_str)
+        if not match:
+            yield event.plain_result(
+                "❌ 时间格式无效\n\n"
+                "正确格式: HH:MM（24小时制）\n"
+                "示例: /lc时间 8:00  或  /lc时间 22:30\n"
+                "恢复默认: /lc时间 默认"
+            )
+            return
+
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            yield event.plain_result("❌ 时间范围无效，小时: 0-23，分钟: 0-59")
+            return
+
+        # 保存并重新注册 CronJob
+        self.user_push_times[user_id] = {"hour": hour, "minute": minute}
+        await self._save_personal_subscription()
+
+        if user_id in self.subscribed_users:
+            umo = self.user_origins.get(user_id)
+            if umo:
+                await self._register_cron_for_user(user_id, umo)
+
+        yield event.plain_result(
+            f"✅ 推送时间已设置为: {hour:02d}:{minute:02d}\n"
+            f"下次推送将按此时间执行。"
+        )
+
     # ========== 个人订阅管理命令 ==========
 
     @filter.command("lc订阅我")
@@ -1234,6 +1692,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 
         self._save_user_origin(event)
         user_id = self._get_user_id(event)
+        umo = self.user_origins.get(user_id) or str(event.session)
 
         # 检查是否在群聊中使用
         if self._get_group_id(event):
@@ -1243,18 +1702,22 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         if user_id in self.subscribed_users:
             yield event.plain_result(
                 "❌ 您已经订阅了 LeetCode 每日一题\n\n"
-                f"每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d} 会推送题目到您的私信"
+                f"推送时间: {self._format_push_time(user_id)}"
             )
             return
 
         self.subscribed_users.append(user_id)
         await self._save_personal_subscription()
 
+        # 注册 CronJob
+        await self._register_cron_for_user(user_id, umo)
+
         yield event.plain_result(
             f"✅ 订阅成功！\n\n"
             f"您已成功订阅 LeetCode 每日一题\n"
-            f"每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d} 会推送题目到您的私信\n\n"
+            f"推送时间: {self._format_push_time(user_id)}\n\n"
             f"其他命令:\n"
+            f"• /lc时间 - 设置推送时间\n"
             f"• /lc语言 - 设置题目显示语言\n"
             f"• /lc退订我 - 取消订阅\n"
             f"• /lc今日 - 立即获取今日题目"
@@ -1276,7 +1739,13 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             return
 
         self.subscribed_users.remove(user_id)
+        # 清理用户自定义推送时间
+        if user_id in self.user_push_times:
+            del self.user_push_times[user_id]
         await self._save_personal_subscription()
+
+        # 取消 CronJob
+        await self._unregister_cron_for_user(user_id)
 
         yield event.plain_result("✅ 已取消订阅 LeetCode 每日一题\n期待您再次使用！")
 
@@ -1301,7 +1770,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         # 订阅状态
         if user_id in self.subscribed_users:
             lines.append("✅ 订阅状态: 已订阅")
-            lines.append(f"📅 推送时间: 每日 {self.personal_inform_hour:02d}:{self.personal_inform_minute:02d}")
+            lines.append(f"📅 推送时间: {self._format_push_time(user_id)}")
         else:
             lines.append("❌ 订阅状态: 未订阅")
             lines.append("💡 使用 /lc订阅我 可以订阅每日推送")
@@ -1311,6 +1780,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         lines.append("可用命令:")
         lines.append("• /lc订阅我 - 订阅推送")
         lines.append("• /lc退订我 - 取消订阅")
+        lines.append("• /lc时间 [HH:MM] - 设置推送时间")
         lines.append("• /lc语言 [zh/en/both] - 设置语言")
         lines.append("• /lc今日 - 获取今日题目")
 
@@ -1380,8 +1850,8 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         user_lang = self._get_user_language(target_user)
         text = self._build_question_message(question, user_lang)
 
-        # 尝试发送
-        yield event.plain_result(f"📤 正在发送题目给用户 {target_user}...")
+        # 直接发送消息给用户
+        yield event.plain_result(f"⏳ 正在发送每日一题给用户 {target_user}...")
         
         # 如果用户未订阅，临时添加到订阅列表以测试
         temp_added = False
@@ -1394,11 +1864,12 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             else:
                 logger.info(f"[测试订阅] 用户 {target_user} 不在订阅列表中，但仍尝试发送")
 
-        # 执行发送
-        sent = await self._send_private_message(target_user, text)
+        # 直接发送（与实际推送走同一条路径）
+        sent = await self._send_private_message(target_user, text, use_image=self.enable_image_push)
 
         if sent:
-            result_msg = f"✅ 题目已成功发送给用户 {target_user}"
+            result_msg = f"✅ 测试推送成功！\n"
+            result_msg += f"📋 已将每日一题发送给用户 {target_user}"
             if temp_added:
                 result_msg += "\n✅ 该用户已添加到个人订阅列表"
             elif target_user in self.subscribed_users:
@@ -1407,12 +1878,11 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 result_msg += "\n💡 该用户未订阅，使用默认语言发送"
             yield event.plain_result(result_msg)
         else:
-            error_msg = f"❌ 发送失败，用户 {target_user} 可能未与机器人建立私信会话"
+            error_msg = f"❌ 测试推送失败，请检查平台配置和用户ID格式"
             if temp_added:
-                # 如果添加失败，回滚订阅状态
                 self.subscribed_users.remove(target_user)
                 await self._save_personal_subscription()
-                error_msg += "\n⚠️ 已回滚订阅状态（用户未实际添加）"
+                error_msg += "\n⚠️ 已回滚订阅状态"
             yield event.plain_result(error_msg)
 
     @filter.command("lc题目")
@@ -1522,10 +1992,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 return
 
         content = question.get("content", "")
-        if not content:
-            yield event.plain_result("❌ 暂无题目内容")
-            return
-
+        content_cn = question.get("contentCn", "")
         title_cn = question.get("titleCn") or question.get("title", "未知题目")
         qid = question.get("frontendQuestionId", "")
         difficulty = question.get("difficulty", "")
@@ -1536,7 +2003,15 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
                 if tag_name:
                     tags.append(tag_name)
 
-        clean_content = clean_html(content)
+        # 如果有题干，先输出题目信息
+        if content or content_cn:
+            question_msg = self._build_question_message(question, language)
+            yield event.plain_result(question_msg)
+
+        if not content:
+            yield event.plain_result("⚠️ 题目描述获取为空，AI 将根据题目信息进行分析...")
+
+        clean_content = html_to_markdown(content)
 
         yield event.plain_result("🤖 正在使用AI分析题目，请稍候...")
 
@@ -1549,6 +2024,11 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
             }.get(language, "请用中文回答。")
 
             # 构建提示词
+            if clean_content:
+                desc_section = f"题目描述:\n{clean_content[:6000]}"
+            else:
+                desc_section = f"（题目描述为空，请根据题目编号 {qid} \"{title_cn}\" 自行分析该LeetCode题目并提供解答）"
+
             prompt = f"""请作为算法专家，分析并解答以下LeetCode题目：
 
 题目编号: {qid}
@@ -1556,8 +2036,7 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
 难度: {difficulty}
 标签: {', '.join(tags)}
 
-题目描述:
-{clean_content[:6000]}
+{desc_section}
 
 请提供：
 1. 题目理解：简要说明题目要求

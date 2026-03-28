@@ -41,5 +41,11 @@
     "type": "string",
     "hint": "指定用于翻译的LLM提供商ID，留空则使用AstrBot默认提供商",
     "default": ""
+  },
+  "enable_image_push": {
+    "description": "推送时使用文转图（图片形式）",
+    "type": "bool",
+    "hint": "开启后，订阅推送将以图片形式发送。关闭则发送纯文本。",
+    "default": false
   }
 }
