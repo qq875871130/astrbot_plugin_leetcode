@@ -786,52 +786,101 @@ class LeetCodePlugin(Star):
         return getattr(client, 'call_action', None) or \
                getattr(getattr(client, 'api', None), 'call_action', None)
 
+    def _is_qq_number(self, user_id: str) -> bool:
+        """判断是否为纯数字QQ号（aiocqhttp格式）"""
+        return user_id.isdigit()
+
+    def _is_openid(self, user_id: str) -> bool:
+        """判断是否为openid（QQ官方API格式，如 264EBBDDA1378C38708B398008FA66F3）"""
+        return len(user_id) == 32 and all(c in '0123456789ABCDEFabcdef' for c in user_id)
+
     async def _send_private_message(self, user_id: str, text: str) -> bool:
-        """发送私信给用户，支持多平台适配。
+        """发送私信给用户，支持多平台适配（aiocqhttp + QQ官方API）。
         
         策略：
-        1. 先尝试 OneBot send_private_msg
-        2. 失败则用 context.send_message + UMO 兜底
+        1. 根据ID格式判断平台类型，使用对应的 OneBot API
+        2. aiocqhttp: 使用 user_id (int)
+        3. QQ官方API: 使用 user_openid (str)
+        4. 失败则用 context.send_message + UMO 兜底
         
         Returns:
             bool: 是否发送成功
         """
+        from astrbot.api.event.filter import PlatformAdapterType
+        
         platforms = self._get_platforms()
         sent = False
+        is_qq_num = self._is_qq_number(user_id)
+        is_openid = self._is_openid(user_id)
 
-        # 策略1: OneBot send_private_msg
-        for platform, _umo_prefix in platforms:
+        logger.info(f"[私信发送] 开始发送 user={user_id}, 类型={'QQ号' if is_qq_num else 'openid' if is_openid else '未知'}")
+
+        # 策略1: 根据ID类型选择合适的平台和API
+        for platform, umo_prefix in platforms:
             call_action = self._get_call_action(platform)
             if not call_action:
                 continue
+            
             try:
-                await call_action("send_private_msg", user_id=int(user_id), message=text)
+                # 判断平台类型
+                platform_type = None
+                try:
+                    # 尝试从 platform 对象获取类型信息
+                    platform_name = getattr(platform, 'name', '') or getattr(platform, 'adapter_name', '')
+                    if 'official' in platform_name.lower() or 'qq_official' in platform_name.lower():
+                        platform_type = 'qq_official'
+                    elif 'aiocqhttp' in platform_name.lower():
+                        platform_type = 'aiocqhttp'
+                except:
+                    pass
+                
+                # 根据ID格式和平台类型选择发送方式
+                if is_openid or platform_type == 'qq_official':
+                    # QQ官方API: 使用 user_openid
+                    await call_action("send_private_msg", user_openid=user_id, message=text)
+                    logger.info(f"[私信发送] QQ官方API发送成功 user_openid={user_id}")
+                else:
+                    # aiocqhttp: 使用 user_id (int)
+                    await call_action("send_private_msg", user_id=int(user_id), message=text)
+                    logger.info(f"[私信发送] aiocqhttp发送成功 user_id={user_id}")
+                
                 sent = True
-                logger.debug(f"[私信发送] OneBot发送成功 user={user_id}")
                 break
             except Exception as e:
-                logger.debug(f"[私信发送] OneBot发送失败 user={user_id}: {e}")
+                logger.debug(f"[私信发送] 平台发送失败 user={user_id}: {e}")
+                continue
 
         # 策略2: context.send_message + UMO 兜底
         if not sent:
             umo = self.user_origins.get(user_id)
             if umo:
                 try:
+                    logger.info(f"[私信发送] 尝试UMO兜底 user={user_id}, umo={umo}")
                     await self.context.send_message(umo, text)
                     sent = True
-                    logger.debug(f"[私信发送] UMO兜底发送成功 user={user_id}")
+                    logger.info(f"[私信发送] UMO兜底发送成功 user={user_id}")
                 except Exception as e:
                     logger.debug(f"[私信发送] UMO兜底发送失败 user={user_id}: {e}")
 
-        # 策略3: 直接尝试 user_id
+        # 策略3: 直接尝试 user_id (构造UMO格式)
         if not sent:
             try:
-                await self.context.send_message(user_id, text)
+                # 根据ID类型构造不同的UMO
+                if is_openid:
+                    umo = f"qq_official:FriendMessage:{user_id}"
+                else:
+                    umo = f"aiocqhttp:FriendMessage:{user_id}"
+                
+                logger.info(f"[私信发送] 尝试构造UMO发送 user={user_id}, umo={umo}")
+                await self.context.send_message(umo, text)
                 sent = True
-                logger.debug(f"[私信发送] user_id直接发送成功 user={user_id}")
+                logger.info(f"[私信发送] 构造UMO发送成功 user={user_id}")
             except Exception as e:
-                logger.debug(f"[私信发送] user_id直接发送失败 user={user_id}: {e}")
+                logger.debug(f"[私信发送] 构造UMO发送失败 user={user_id}: {e}")
 
+        if not sent:
+            logger.error(f"[私信发送] 所有策略均失败 user={user_id}")
+        
         return sent
 
     async def _send_question_to_personal_subscribers(self, question: Dict):
