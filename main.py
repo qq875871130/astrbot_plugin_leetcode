@@ -758,6 +758,82 @@ class LeetCodePlugin(Star):
             except Exception as e:
                 logger.error(f"发送题目到群 {group_id} 失败: {e}")
 
+    def _get_platforms(self) -> list:
+        """获取可用的平台实例列表，返回 [(platform, umo_prefix), ...]。"""
+        from astrbot.api.event.filter import PlatformAdapterType
+        results = []
+        platform_configs = [
+            (PlatformAdapterType.AIOCQHTTP, "aiocqhttp:FriendMessage"),
+            (PlatformAdapterType.QQOFFICIAL, "qq_official:FriendMessage"),
+        ]
+        for adapter_type, umo_prefix in platform_configs:
+            try:
+                platform = self.context.get_platform(adapter_type)
+                if platform:
+                    results.append((platform, umo_prefix))
+            except Exception:
+                continue
+        return results
+
+    @staticmethod
+    def _get_call_action(platform):
+        """从平台实例中提取 OneBot call_action 方法，找不到返回 None。"""
+        client = getattr(platform, 'get_client', lambda: None)() or \
+                 getattr(platform, 'client', None) or \
+                 getattr(platform, 'bot', None)
+        if not client:
+            return None
+        return getattr(client, 'call_action', None) or \
+               getattr(getattr(client, 'api', None), 'call_action', None)
+
+    async def _send_private_message(self, user_id: str, text: str) -> bool:
+        """发送私信给用户，支持多平台适配。
+        
+        策略：
+        1. 先尝试 OneBot send_private_msg
+        2. 失败则用 context.send_message + UMO 兜底
+        
+        Returns:
+            bool: 是否发送成功
+        """
+        platforms = self._get_platforms()
+        sent = False
+
+        # 策略1: OneBot send_private_msg
+        for platform, _umo_prefix in platforms:
+            call_action = self._get_call_action(platform)
+            if not call_action:
+                continue
+            try:
+                await call_action("send_private_msg", user_id=int(user_id), message=text)
+                sent = True
+                logger.debug(f"[私信发送] OneBot发送成功 user={user_id}")
+                break
+            except Exception as e:
+                logger.debug(f"[私信发送] OneBot发送失败 user={user_id}: {e}")
+
+        # 策略2: context.send_message + UMO 兜底
+        if not sent:
+            umo = self.user_origins.get(user_id)
+            if umo:
+                try:
+                    await self.context.send_message(umo, text)
+                    sent = True
+                    logger.debug(f"[私信发送] UMO兜底发送成功 user={user_id}")
+                except Exception as e:
+                    logger.debug(f"[私信发送] UMO兜底发送失败 user={user_id}: {e}")
+
+        # 策略3: 直接尝试 user_id
+        if not sent:
+            try:
+                await self.context.send_message(user_id, text)
+                sent = True
+                logger.debug(f"[私信发送] user_id直接发送成功 user={user_id}")
+            except Exception as e:
+                logger.debug(f"[私信发送] user_id直接发送失败 user={user_id}: {e}")
+
+        return sent
+
     async def _send_question_to_personal_subscribers(self, question: Dict):
         """发送题目到所有个人订阅者"""
         for user_id in self.subscribed_users:
@@ -766,11 +842,12 @@ class LeetCodePlugin(Star):
                 user_lang = self._get_user_language(user_id)
                 text = self._build_question_message(question, user_lang)
                 
-                await self.context.send_message(
-                    self._get_session_for_user(user_id),
-                    text
-                )
-                logger.info(f"LeetCode 每日一题已发送到用户 {user_id}")
+                sent = await self._send_private_message(user_id, text)
+                if sent:
+                    logger.info(f"LeetCode 每日一题已发送到用户 {user_id}")
+                else:
+                    logger.error(f"[个人订阅] 所有发送策略均失败 user={user_id}")
+                
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"发送题目到用户 {user_id} 失败: {e}")
@@ -1211,6 +1288,83 @@ AI会提供：题目理解、解题思路、算法步骤、参考代码、关键
         lines.append(f"总计: {len(self.subscribed_users)} 人")
 
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("lc测试订阅")
+    async def cmd_test_personal_subscription(self, event: AstrMessageEvent, target_user: str = ""):
+        """测试个人订阅推送（管理员命令）
+        
+        用法：/lc测试订阅 [用户ID] [--add]
+        示例：/lc测试订阅 123456789
+              /lc测试订阅 123456789 --add（测试并添加到订阅列表）
+        """
+        if not self._is_admin(event):
+            yield event.plain_result("⚠️ 只有管理员可以使用此命令")
+            return
+
+        # 解析参数
+        add_to_subscription = "--add" in target_user
+        target_user = target_user.replace("--add", "").strip()
+
+        if not target_user:
+            yield event.plain_result("❌ 请指定用户ID\n\n用法：/lc测试订阅 [用户ID] [--add]\n示例：/lc测试订阅 123456789")
+            return
+
+        # 获取今日题目
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        question = None
+
+        # 检查缓存
+        if self.today_question and self.today_date == today_date:
+            question = self.today_question
+        else:
+            yield event.plain_result(f"⏳ 正在获取今日题目并发送给用户 {target_user}...")
+            question = await self._fetch_daily_question()
+            if question:
+                self.today_question = question
+                self.today_date = today_date
+
+        if not question:
+            yield event.plain_result("❌ 获取今日题目失败，无法测试发送")
+            return
+
+        # 获取用户语言偏好（如果用户已订阅）
+        user_lang = self._get_user_language(target_user)
+        text = self._build_question_message(question, user_lang)
+
+        # 尝试发送
+        yield event.plain_result(f"📤 正在发送题目给用户 {target_user}...")
+        
+        # 如果用户未订阅，临时添加到订阅列表以测试
+        temp_added = False
+        if target_user not in self.subscribed_users:
+            if add_to_subscription:
+                self.subscribed_users.append(target_user)
+                await self._save_personal_subscription()
+                temp_added = True
+                logger.info(f"[测试订阅] 已将用户 {target_user} 添加到订阅列表")
+            else:
+                logger.info(f"[测试订阅] 用户 {target_user} 不在订阅列表中，但仍尝试发送")
+
+        # 执行发送
+        sent = await self._send_private_message(target_user, text)
+
+        if sent:
+            result_msg = f"✅ 题目已成功发送给用户 {target_user}"
+            if temp_added:
+                result_msg += "\n✅ 该用户已添加到个人订阅列表"
+            elif target_user in self.subscribed_users:
+                result_msg += f"\n📋 该用户当前语言设置: {user_lang}"
+            else:
+                result_msg += "\n💡 该用户未订阅，使用默认语言发送"
+            yield event.plain_result(result_msg)
+        else:
+            error_msg = f"❌ 发送失败，用户 {target_user} 可能未与机器人建立私信会话"
+            if temp_added:
+                # 如果添加失败，回滚订阅状态
+                self.subscribed_users.remove(target_user)
+                await self._save_personal_subscription()
+                error_msg += "\n⚠️ 已回滚订阅状态（用户未实际添加）"
+            yield event.plain_result(error_msg)
 
     @filter.command("lc题目")
     async def cmd_question(self, event: AstrMessageEvent, question_id: str = ""):
